@@ -204,12 +204,8 @@ M0 当前包含：
 
 ## 8. 下一阶段
 
-详见 [完整实施计划](docs/implementation_plan.md)。下一阶段 M1 是：
 
-```text
-Ubuntu 22.04 + ROS 2 Humble + AUBO ES3描述包
-+ ros2_control FakeSystem + RViz + MoveIt 2
-```
+
 ## 9. 全身点头动作
 
 直接运行根目录的 `main.py`，在菜单中选择第 3 项；或者使用统一入口子命令：
