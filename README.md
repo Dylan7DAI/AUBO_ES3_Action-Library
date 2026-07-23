@@ -1,101 +1,129 @@
-# AUBO ES3 动作库项目
+# AUBO Python 动作库
 
-现有 AUBO Python SDK 连接代码已整理为可复用模块，并提供只读诊断和默认 dry-run 的小范围关节测试工具。
+这是一个面向 AUBO 六轴机械臂的 Python 动作库示例。项目将控制器连接、配置读取、安全校验和具体动作分层组织，并通过统一入口提供只读诊断、关节小步测试、点头动作和水杯位置往返动作。
 
-> 安全提示：本项目不能替代 AUBO 官方安全功能、风险评估或现场监护。首次真机测试必须由熟悉设备的人员在场，保持急停可达，并清空机械臂工作空间。
+项目默认采用保守策略：除只读状态读取外，动作命令默认只预演；只有显式授权后才会进入真机运动流程。
 
-## 当前环境
+> **安全提示**：本项目不能替代 AUBO 官方安全功能、设备手册、风险评估或现场监护。任何真机动作都必须由熟悉设备的人员在场执行，确保工作空间无人、急停可达，并提前验证关节限位、工具、夹具、线缆和完整运动路径。
 
-已检测到的本机解释器：
+## 功能
 
-```text
-C:\Users\Lenovo\anaconda3\envs\aubo\python.exe
-Python 3.11.15
-pyaubo-sdk 0.24.1
-```
+| 功能 | 命令 | 默认行为 |
+| --- | --- | --- |
+| 只读诊断与当前位姿读取 | `diagnose` | 连接控制器，只读取状态，不上电、不运动 |
+| 小范围关节测试 | `joint` | 读取当前位置并预览目标，不上电、不运动 |
+| 点头动作 | `nod` | 完全离线生成轨迹，不连接控制器 |
+| 水杯位置往返 | `cup` | 完全离线检查动作计划，不连接控制器 |
 
-PowerShell 中当前没有全局 `python` 命令，因此下面示例使用解释器绝对路径。也可以在 PyCharm 中继续选择名为 `aubo` 的解释器。
+只读诊断会输出：
 
-## 目录
+- 机器人名称和上电状态；
+- 当前 J1～J6 关节角，单位为 rad 和 degree；
+- 当前 TCP 位置 X/Y/Z，单位为 m；
+- 当前 TCP 姿态 RX/RY/RZ，单位为 rad 和 degree。
+
+## 项目结构
 
 ```text
 AUBO/
-├─ main.py                     # 唯一的根目录入口和中文交互菜单
+├─ main.py                     # 唯一启动入口和交互菜单
 ├─ config/
-│  ├─ robot.example.json       # 可提交的配置模板
-│  └─ robot.local.json         # 本机配置，已被 .gitignore 忽略
+│  └─ robot.example.json       # 配置模板
 ├─ docs/
-│  ├─ implementation_plan.md
-│  └─ safety_checklist.md
+│  └─ safety_checklist.md      # 真机运动安全检查清单
 ├─ host_tools/
-│  ├─ diagnose_robot.py        # 只读诊断实现
-│  ├─ safe_joint_test.py       # 小范围关节测试实现
-│  ├─ nod_action.py            # 点头动作实现
-│  └─ cup_action.py            # 水杯往返动作实现
-├─ src/aubo_sdk_client/        # 配置、SDK 客户端和安全校验
-├─ tests/
+│  ├─ diagnose_robot.py        # 只读诊断与位姿读取
+│  ├─ safe_joint_test.py       # 小范围关节测试
+│  ├─ nod_action.py            # 点头动作
+│  └─ cup_action.py            # 水杯位置往返动作
+├─ src/aubo_sdk_client/
+│  ├─ client.py                # AUBO SDK 客户端封装
+│  ├─ config.py                # 配置加载与校验
+│  └─ safety.py                # 关节目标和增量安全检查
+├─ tests/                      # 离线单元测试
 ├─ requirements.txt
 └─ .gitignore
 ```
 
-## 1. 统一入口
-
-根目录现在只保留一个 Python 入口：
+调用关系如下：
 
 ```text
 main.py
+  └─ host_tools：具体动作与工具流程
+       └─ src/aubo_sdk_client：连接、配置和安全校验
 ```
 
-直接双击或不带参数运行时，会显示中文菜单：
+## 环境要求
+
+- Python 3.10 或更高版本；
+- 与当前 Python 版本和操作系统匹配的 AUBO Python SDK；
+- 可以访问机器人控制器的网络环境。
+
+创建虚拟环境并安装依赖：
+
+```bash
+python -m venv .venv
+```
+
+Windows PowerShell：
 
 ```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-菜单可以选择：
+Linux/macOS：
 
-1. 只读连接诊断，并读取当前六轴关节位置和 TCP 位姿；
-2. 小范围关节测试；
-3. 点头动作；
-4. 水杯位置往返。
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-菜单只负责收集选择和参数，真正的功能分别位于 `host_tools/`，底层配置、SDK 客户端和安全校验位于 `src/aubo_sdk_client/`。其中第 1 项会通过只读状态接口同时显示当前 J1～J6 关节角，以及 TCP 的 X/Y/Z 和 RX/RY/RZ；不会上电、启动或发送运动命令。
+如果厂商 SDK 无法通过 `pip` 安装，请按照 AUBO SDK 随附文档，将与系统及 Python 版本匹配的 SDK 安装到当前环境中。
 
-也可以使用统一入口的子命令模式：
+## 配置
+
+复制配置模板：
+
+Windows PowerShell：
 
 ```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py diagnose --json
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py joint --delta 0,0,0,0,0,0.02
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py nod --scale 1.0
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py cup --cup-hold 2.0
+Copy-Item config/robot.example.json config/robot.local.json
 ```
 
-## 2. 配置
+Linux/macOS：
 
-已创建本地配置：
-
-```text
-config/robot.local.json
+```bash
+cp config/robot.example.json config/robot.local.json
 ```
 
-该文件已被 `.gitignore` 排除。请检查其中：
+然后修改 `config/robot.local.json`：
 
-- IP 和端口；
-- 用户名和密码；
-- 请求超时；
-- 关节软限位；
-- 单次运动最大增量；
-- 测试速度和加速度。
+```json
+{
+  "robot": {
+    "ip": "192.168.2.1",
+    "port": 30004,
+    "username": "aubo",
+    "password": "CHANGE_ME",
+    "request_timeout_ms": 3000
+  },
+  "safety": {
+    "joint_count": 6,
+    "joint_min_rad": [-3.14159265, -3.14159265, -3.14159265, -3.14159265, -3.14159265, -3.14159265],
+    "joint_max_rad": [3.14159265, 3.14159265, 3.14159265, 3.14159265, 3.14159265, 3.14159265],
+    "max_delta_rad": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+    "max_velocity_rad_s": 0.10,
+    "max_acceleration_rad_s2": 0.10,
+    "power_on_wait_s": 3.0,
+    "startup_wait_s": 2.0
+  }
+}
+```
 
-### 重要：软限位仍需核实
+`config/robot.local.json` 已被 `.gitignore` 排除，不应提交真实密码。
 
-模板中的 ±π 只是 M0 的保守占位范围，**不是对 ES3 官方关节限位的声明**。在执行真实运动前，请根据以下材料更新：
-
-1. 当前 ES3 型号的官方手册；
-2. 当前控制器/ARCS 中显示的实际软限位；
-3. 现场工装、夹爪、线缆和安全区域形成的更严格限制。
-
-敏感配置也可以用环境变量覆盖：
+也可以使用环境变量覆盖连接信息：
 
 ```text
 AUBO_ROBOT_IP
@@ -105,161 +133,187 @@ AUBO_PASSWORD
 AUBO_REQUEST_TIMEOUT_MS
 ```
 
-## 3. 只读诊断
+> 模板中的 `±π` 只是示例值，不代表任何具体型号的官方关节限位。真机执行前必须根据机器人型号、控制器配置和现场碰撞空间填写正确的软限位。
 
-本命令只连接、登录和读取状态，不会调用上电、启动或运动接口：
+## 快速开始
 
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py diagnose
+启动中文交互菜单：
+
+```bash
+python main.py
 ```
 
-JSON 输出：
+菜单包含：
 
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py diagnose --json
+```text
+1. 只读连接诊断 + 当前位姿读取
+2. 小范围关节测试
+3. 点头动作
+4. 水杯位置往返
+0. 退出
 ```
 
-也可以直接运行 `main.py`，在菜单中选择第 1 项。
+查看所有子命令：
 
-## 4. 安全运动预览
-
-下面只连接机器人并读取当前位置，然后预览 J6 增加 0.02 rad 的目标。默认不会上电、启动或运动：
-
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py joint `
-  --delta 0,0,0,0,0,0.02
+```bash
+python main.py --help
 ```
 
-也可以在 `main.py` 菜单中选择第 2 项并直接回车使用默认增量。
+查看某个动作的完整参数：
 
-程序会打印：
+```bash
+python main.py diagnose --help
+python main.py joint --help
+python main.py nod --help
+python main.py cup --help
+```
 
-- 当前关节角；
-- 关节增量；
-- 目标关节角；
-- rad 与 degree；
-- 测试速度和加速度；
-- 是否违反单次增量或软限位。
+## 只读诊断与当前位姿
 
-## 5. 真实运动
+```bash
+python main.py diagnose
+```
 
-只有同时提供以下两个参数才可能进入真实运动路径：
+输出 JSON：
+
+```bash
+python main.py diagnose --json
+```
+
+该功能只建立连接、登录并读取机器人状态，不调用上电、启动或运动接口。TCP 坐标系和工具定义以控制器当前配置为准。
+
+## 小范围关节测试
+
+预览 J6 相对当前位置增加 `0.02 rad`：
+
+```bash
+python main.py joint --delta 0,0,0,0,0,0.02
+```
+
+默认流程为：
+
+1. 连接控制器并读取当前关节角；
+2. 校验当前姿态、单次增量和目标软限位；
+3. 打印当前值、增量和目标值；
+4. 不上电、不启动、不运动。
+
+程序会同时显示 rad 和 degree，方便执行前人工核对。
+
+## 点头动作
+
+全身协调点头：
+
+```bash
+python main.py nod --style full-body --scale 1.0 --count 1
+```
+
+单腕小幅动作：
+
+```bash
+python main.py nod --style wrist --joint 5 --amplitude 0.04 --count 1
+```
+
+默认仅使用示例起始姿态离线生成轨迹，不连接机器人。
+
+全身模式由 J1～J6 协调参与，轨迹根据 `max_delta_rad` 自动拆分为多个小 waypoint，动作结束后返回执行前的起始姿态。动作倍率范围为 `0.25`～`1.5`。
+
+默认速度为 `0.35 rad/s`，默认加速度为 `0.70 rad/s²`；代码限制最高速度为 `0.50 rad/s`，最高加速度为 `1.00 rad/s²`。
+
+## 水杯位置往返动作
+
+离线预演：
+
+```bash
+python main.py cup --cup-hold 2.0
+```
+
+真机执行时，动作顺序为：
+
+```text
+执行前的当前关节姿态 -> 水杯关节姿态 -> 执行前的当前关节姿态
+```
+
+当前示例水杯关节目标：
+
+```text
+[0.31908, -0.588733, 1.432912, -0.222756, 1.742074, 0.151014]
+```
+
+对应的参考 TCP 位姿：
+
+```text
+[0.413412, 0.028213, 0.154102, -2.450776, -0.03654, 1.6655]
+```
+
+到达水杯位置后默认停顿 `2s`，随后返回执行前姿态。程序会打印实际 TCP 与参考 TCP 的位置和姿态误差。
+
+> 上述关节目标和 TCP 位姿来自特定示例环境，不能直接视为其他机器人、工作台、工具或坐标系的安全目标。使用者必须在 `host_tools/cup_action.py` 中替换并验证适合自己现场的目标值。
+
+该动作使用两段直接关节运动，没有中间避障点。执行前必须确认两段完整关节空间路径均不会发生碰撞。
+
+## 真机执行授权
+
+命令行真实运动必须同时提供：
 
 ```text
 --execute
 --confirm-motion I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT
 ```
 
-完整命令示例：
+例如：
 
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py joint `
-  --delta 0,0,0,0,0,0.02 `
-  --execute `
+```bash
+python main.py nod \
+  --style full-body \
+  --scale 1.0 \
+  --execute \
   --confirm-motion I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT
 ```
 
-执行顺序为：
-
-1. 连接并读取当前位置；
-2. 第一次软限位和增量检查；
-3. 打印完整运动预览；
-4. 检查显式确认文本；
-5. 上电和启动；
-6. 重新读取当前位置；
-7. 第二次软限位和增量检查；
-8. 使用配置中的低速度、低加速度调用 `moveJoint`。
-
-真实运动前必须完成 [安全检查清单](docs/safety_checklist.md)。
-
-## 6. 离线测试
-
-测试不会连接真机：
+Windows PowerShell 可以写成一行：
 
 ```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe -m unittest discover -s tests -v
+python main.py nod --style full-body --scale 1.0 --execute --confirm-motion I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT
+```
+
+交互菜单中只有输入大写 `MOVE` 才会把运动授权传递给动作工具。
+
+真实运动路径仍会执行以下检查：
+
+- 配置文件完整性；
+- 六关节向量长度和有限数检查；
+- 当前关节姿态软限位；
+- 单次关节增量限制；
+- 目标关节姿态软限位；
+- 上电和启动后的二次状态读取；
+- 速度和加速度硬上限；
+- 固定确认文本。
+
+软件检查不能替代控制器急停、保护停止和硬件安全功能。执行前请完成 [安全检查清单](docs/safety_checklist.md)。
+
+## 添加新动作
+
+建议按以下方式扩展动作库：
+
+1. 在 `host_tools/` 中新增动作模块，例如 `wave_action.py`；
+2. 将轨迹生成与参数校验写成可离线测试的函数；
+3. 复用 `src/aubo_sdk_client/` 中的连接、配置和安全校验；
+4. 默认使用 dry-run，真实运动必须要求显式授权；
+5. 在 `main.py` 中注册新的子命令和菜单项；
+6. 在 `tests/` 中添加不连接真机的单元测试。
+
+不要把控制器密码、未经验证的现场坐标或缺少限位检查的运动代码提交到公开仓库。
+
+## 测试
+
+单元测试默认不连接真机：
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 语法检查：
 
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe -m compileall src host_tools tests
+```bash
+python -m compileall -q src host_tools tests main.py
 ```
-
-## 7. 安全设计
-
-M0 当前包含：
-
-- 凭据移出 Git 跟踪源码；
-- 配置校验；
-- SDK 延迟导入，允许离线测试；
-- 连接、登录、机器人发现和状态读取异常封装；
-- 上下文管理和自动断开；
-- 默认 dry-run；
-- 显式 `--execute`；
-- 固定确认文本；
-- 六关节向量长度检查；
-- NaN/无穷大检查；
-- 当前姿态软限位检查；
-- 单次增量限制；
-- 目标姿态软限位检查；
-- 上电/启动后重新读取并验证目标；
-- 低速度、低加速度配置。
-
-当前还没有实现控制器级急停，也没有通过 Python 对机械臂施加硬实时安全保证。急停、保护停止和控制器自身安全机制仍然是最终防线。
-
-## 8. 下一阶段
-
-详见 [完整实施计划](docs/implementation_plan.md)。下一阶段 M1 是：
-
-```text
-Ubuntu 22.04 + ROS 2 Humble + AUBO ES3描述包
-+ ros2_control FakeSystem + RViz + MoveIt 2
-```
-## 9. 全身点头动作
-
-直接运行根目录的 `main.py`，在菜单中选择第 3 项；或者使用统一入口子命令：
-
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py nod --scale 1.0
-```
-
-默认命令只做离线预演，不连接、不上电、不运动。全身模式让 J1～J6 协调参与：J2、J3、J5 形成明显的抬头/俯身，J1、J4、J6 配合摆动。动作的最大单关节相对偏移约为 `0.12 rad`（约 `6.88°`），整体轨迹会根据 `max_delta_rad` 自动拆分成多个小 waypoint，动作结束后回到本次动作的起始姿态。
-
-动作倍率可以设置为 `0.25`～`1.5`；全身点头默认速度为 `0.35 rad/s`、加速度为 `0.70 rad/s²`。代码硬性限制最高速度为 `0.50 rad/s`、最高加速度为 `1.00 rad/s²`。过渡 waypoint 不额外停顿，五个关键姿态的停顿合计约 `0.55s`。原来的单腕小幅点头仍可通过以下命令使用：
-
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py nod --style wrist
-```
-
-真实运动必须在菜单中输入 `MOVE`，或显式提供 `--execute` 和固定确认文本。注意：程序以启动后的当前姿态作为动作中位，不会盲目运动到 `[0,0,0,0,0,0]`。固定 Home 复位必须先提供现场确认过的 J1～J6 Home 关节角。`config/robot.local.json` 里的 ±π 仍是占位软限位，未核实真实限位和碰撞空间前不应执行真机动作。
-
-## 10. 水杯位置往返动作
-
-直接运行根目录的 `main.py`，在菜单中选择第 4 项；或者使用统一入口子命令：
-
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py cup --cup-hold 2.0
-```
-
-默认命令只做离线预演。真实执行时，程序会在真正开始运动前读取并记录当前六关节姿态，然后按以下顺序执行：
-
-```text
-启动时正常姿态 -> 水杯关节姿态 -> 启动时正常姿态
-```
-
-水杯关节目标固定为：
-
-```text
-[0.31908, -0.588733, 1.432912, -0.222756, 1.742074, 0.151014]
-```
-
-参考 TCP 位姿为：
-
-```text
-[0.413412, 0.028213, 0.154102, -2.450776, -0.03654, 1.6655]
-```
-
-默认速度为 `0.35 rad/s`、加速度为 `0.70 rad/s²`。程序只在到达水杯位置后停顿 `2s`，随后立即返回；途中和返回到位后都不设置人为停顿。到达水杯后会打印实际 TCP 与参考 TCP 的位置/姿态误差，但仍以关节到位为主要运动判据。
-
-> 该动作是两段直接关节运动，没有中间避障点。第一次真机运行前，必须确认从当前正常姿态到水杯姿态的整条关节空间路径不会碰撞。当前 `config/robot.local.json` 中的 ±π 软限位仍需按真机核实。
