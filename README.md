@@ -9,7 +9,6 @@
 已检测到的本机解释器：
 
 ```text
-C:\Users\Lenovo\anaconda3\envs\aubo\python.exe
 Python 3.11.15
 pyaubo-sdk 0.24.1
 ```
