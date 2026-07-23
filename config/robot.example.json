@@ -1,0 +1,19 @@
+﻿{
+  "robot": {
+    "ip": "192.168.2.1",
+    "port": 30004,
+    "username": "aubo",
+    "password": "CHANGE_ME",
+    "request_timeout_ms": 3000
+  },
+  "safety": {
+    "joint_count": 6,
+    "joint_min_rad": [-3.14159265, -3.14159265, -3.14159265, -3.14159265, -3.14159265, -3.14159265],
+    "joint_max_rad": [3.14159265, 3.14159265, 3.14159265, 3.14159265, 3.14159265, 3.14159265],
+    "max_delta_rad": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+    "max_velocity_rad_s": 0.10,
+    "max_acceleration_rad_s2": 0.10,
+    "power_on_wait_s": 3.0,
+    "startup_wait_s": 2.0
+  }
+}

@@ -1,0 +1,2 @@
+﻿# The vendor SDK is already installed in the project's `aubo` Conda environment.
+pyaubo-sdk==0.24.1
