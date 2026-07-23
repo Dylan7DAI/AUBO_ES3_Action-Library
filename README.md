@@ -45,11 +45,6 @@ AUBO/
 main.py
 ```
 
-直接双击或不带参数运行时，会显示中文菜单：
-
-```powershell
-& C:\Users\Lenovo\anaconda3\envs\aubo\python.exe main.py
-```
 
 菜单可以选择：
 
