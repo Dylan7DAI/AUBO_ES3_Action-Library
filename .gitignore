@@ -20,15 +20,3 @@ config/*.local.json
 .DS_Store
 Thumbs.db
 
-# ROS 2 / simulation outputs
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
-*.bag
-*.db3
-
-# Data and model artifacts
-datasets/
-models/*.pt
-models/*.pth
-models/*.onnx
