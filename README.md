@@ -1,19 +1,203 @@
 # AUBO ES3 动作库项目
 
+## HCI 多轮猜杯研究系统（Ubuntu 20.04）
+
+> Ubuntu 20.04 已结束标准维护期。2026 年部署应启用 Ubuntu Pro/ESM 并安装当前
+> 安全更新；支持周期见 [Ubuntu Releases](https://wiki.ubuntu.com/Releases)。
+
+本仓库现在包含需求文档 v0.9 对应的可运行研究平台：
+
+- `robot_game/`：多轮状态机、三种实验条件、动作白名单、LLM 输出验证、
+  单机械臂动作队列和 AUBO/夹爪适配器；
+- `robot_game/static/`：研究人员使用的 WebSocket Wizard-of-Oz 控制台；
+- `config/study.example.json`：实验、安全、工位、轨迹和 LLM 配置；
+- `logs/<session_id>/`：按会话组织的可读日志、摘要和可校验的哈希链 JSONL；
+- `vendor/pyaubo_sdk/`：Ubuntu 20.04 / Conda CPython 3.10 / x86-64 的官方
+  `pyaubo-sdk 0.24.1` wheel 与 SHA-256 校验文件；
+- `scripts/setup_ubuntu20.sh`：Ubuntu 20.04 部署环境安装与离线 SDK 安装；
+- `scripts/verify_event_log.py`：实验事件日志完整性验证。
+
+### 完整运行一次不连接机械臂的实验（mock + 可选真实 OpenAI）
+
+下面这套命令不会连接机械臂，适用于 Ubuntu 20.04 x86-64，也适用于 Apple
+Silicon 上的 Ubuntu ARM64 虚拟机。首次运行时，在项目根目录执行：
+
+```bash
+conda env create --name aubo --file environment.yml
+conda activate aubo
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+cp config/study.example.json config/study.local.json
+cp config/robot.example.json config/robot.local.json
+```
+
+如果名为 `aubo` 的环境已经存在，使用下面的更新命令代替 `conda env create`：
+
+```bash
+conda env update --name aubo --file environment.yml
+conda activate aubo
+python -m pip install -r requirements.txt
+```
+
+#### 申请并配置 OpenAI API Key
+
+OpenAI API 与 ChatGPT Plus/Pro 使用不同的计费系统；已有 ChatGPT 订阅不等于已经
+开通 API 额度。按以下步骤申请：
+
+1. 登录或注册 [OpenAI API Platform](https://platform.openai.com/)；
+2. 打开 [API Billing Overview](https://platform.openai.com/settings/organization/billing/overview)，
+   按页面提示添加付款方式或购买 API credits；
+3. 打开 [API Keys](https://platform.openai.com/api-keys)，选择用于本研究的 Project，
+   点击 `Create new secret key`，建议命名为 `aubo-es3-study`；
+4. 创建后立即把完整密钥保存到受保护的密码管理器。完整 secret key 只在创建时显示，
+   丢失后需要撤销旧密钥并创建新密钥；
+5. 不要把密钥写入 `study.local.json`、Prompt、源码、Git、实验日志或聊天消息。只在
+   启动服务器的终端中设置环境变量：
+
+```bash
+export OPENAI_API_KEY="粘贴刚创建的密钥"
+```
+
+官方参考：[Developer quickstart](https://platform.openai.com/docs/quickstart/make-your-first-api-request)、
+[API key help](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key)、
+[API key permissions](https://help.openai.com/en/articles/8867743-assign-api-key-permissions)。
+
+设置完成后，先做一次不会连接机械臂的付费预检：
+
+```bash
+export OPENAI_API_KEY="你的OpenAI API密钥"
+export AUBO_ROBOT_MODE=mock
+python scripts/verify_openai_llm.py --study-config config/study.local.json
+```
+
+然后启动研究人员控制网页：
+
+```bash
+export AUBO_ROBOT_MODE=mock
+python main.py study \
+  --study-config config/study.local.json \
+  --robot-config config/robot.local.json \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+其中 `--robot-config`、`--host` 和 `--port` 可以省略，因为它们的默认值分别是
+`config/robot.local.json`、`127.0.0.1` 和 `8000`。推荐的最短启动命令是：
+
+```bash
+export AUBO_ROBOT_MODE=mock
+python main.py study --study-config config/study.local.json
+```
+
+不要在需要本地实验配置时省略 `--study-config`：单独运行 `python main.py study`
+会读取仓库提供的 `config/study.example.json`，而不是 `config/study.local.json`。
+所有默认值和说明也可通过 `python main.py study --help` 查看。
+
+保持终端运行，浏览器打开 `http://127.0.0.1:8000`。输入 Participant ID 和唯一的
+Session ID，选择 `Task-only`、`History-aware rule` 或 `LLM-based`，保持
+`Formal study` 不勾选，然后点击 `Start locked session`，按页面亮起的按钮完成每轮。
+`AUBO_ROBOT_MODE=mock` 会强制使用内存中的软件机械臂和软件夹爪，因此即使
+`robot.local.json` 中存在机器人 IP，也不会建立机械臂连接。
+
+如果不想产生 OpenAI 费用，不设置 `OPENAI_API_KEY`，只测试 Task-only 和
+Rule-based 条件；LLM-based 条件会在会话开始前明确拒绝缺少密钥的请求。
+
+Ubuntu 20.04 x86-64 真机部署也可以用一键脚本完成相同 Conda 环境和 SDK 安装：
+
+```bash
+chmod +x scripts/*.sh
+./scripts/setup_ubuntu20.sh
+conda activate aubo
+```
+
+安装脚本要求预先安装 Miniconda 或 Anaconda，并根据 `environment.yml` 创建统一命名为
+`aubo` 的 Conda 环境。项目不再使用 `python -m venv` 或 `source .venv/bin/activate`。
+若尚未安装 Conda，按
+[Conda Linux 安装指南](https://docs.conda.io/projects/conda/en/stable/user-guide/install/linux.html)
+安装并重新打开终端；若 `conda activate` 提示 shell 未初始化，执行 `conda init bash`
+后重新打开终端。
+
+示例配置固定为 `robot_mode=mock`、`formal_study=false`、`time_scale=0.02`。
+LLM 条件默认使用 `gpt-5.6-terra`、低推理强度和严格 Structured Outputs；模型、推理
+强度、输出token上限及5秒阶段预算均可在 `config/study.local.json` 调整。密钥只从
+环境变量读取，不写入配置、prompt或实验日志。需要完全离线调试时，可把
+`llm.provider` 临时改为 `mock`，但正式研究禁止Mock LLM。
+
+OpenAI 的完整 Prompt 位于 `config/openai_prompt.txt`。角色说明、约束、Few-shot
+示例、重试说明以及动态上下文/Schema 占位符都在这一个文件中；Python 代码只读取
+并填充模板。修改模板后无需修改代码，模板 SHA-256 会自动写入实验日志。
+
+若研究人员不在本机访问，应通过反向代理
+提供 HTTPS，并设置高强度 `AUBO_RESEARCHER_TOKEN`；服务拒绝在无 token 时绑定到
+非本机地址。
+
+### 切换真机前的强制门
+
+不要直接把示例轨迹用于真机。复制为 `config/study.local.json` 后，至少完成：
+
+1. 先离线审查，再在清空工位、最低安全速度和实体急停可达时逐点验证三只杯的
+   `pre/pick/lift`、放置、撤回和 Home；
+2. 在清空工位、低速、急停可达且有人监护的情况下逐点标定真机；
+3. 标定五种表达动作的相对关节模板，确认无自碰撞、桌面/杯子/用户碰撞和奇异位形；
+4. 按 ES3、控制器和现场工作空间更新两份配置中的关节限位、速度、加速度和单命令增量；
+5. 配置实际夹爪。当前真机适配器支持控制器标准数字输出，可选数字输入闭合反馈；
+6. 将 `workcell.calibrated` 与 `expressive_calibrated` 设为 `true`，
+   `runtime.robot_mode` 设为 `real`，`time_scale` 设为 `1`；
+7. 设置研究人员 token，并在正式研究配置中锁定 `formal_study=true` 和 condition。
+
+任一校准标志缺失、夹爪仍是 mock、正式模式使用 mock LLM、正式模式加速时间、
+或正式模式没有 token 时，系统会在连接机器人之前拒绝启动。软件
+`emergency_stop` 调用 SDK `stopJoint`，但它不能替代控制器和实体急停。
+
+### 运行时日志
+
+每次会话生成：
+
+```text
+logs/S001/
+├── events.jsonl          # 原始、顺序化、SHA-256 链式事件（每条写入后 fsync）
+├── runtime.log           # 便于调试的旋转文本日志
+└── session_summary.json  # 当前状态、轮次、结果、invalid 原因
+```
+
+`events.jsonl` 记录会话/轮次、WoZ 发送与 ack、状态转换、LLM prompt 版本/hash/
+上下文/原始输出/解析/延迟、动作函数/variant/请求与校验后参数、SDK 返回码、
+动作真实起止时间，以及每次动作前可获得的机器人安全模式、碰撞、软限位、关节
+位置/速度/加速度/力矩/电流/温度、TCP、控制柜温湿度和电压电流。旧 SDK 不支持的
+字段以 `null` 或 `read_error` 明确记录，不会伪造数值。
+
+验证一份日志：
+
+```bash
+python scripts/verify_event_log.py logs/S001/events.jsonl
+```
+
+在 mock 状态机中将每条固定杯子路径各运行 20 次，并核对无错误事件且最终返回
+Home：
+
+```bash
+python scripts/run_mock_acceptance.py
+```
+
+完整架构、消息协议、配置和现场投产步骤见
+[研究系统部署与校准指南](docs/study_system.md)。
+每个维护文件的职责见 [Project file guide](FILE_GUIDE.md)，需求覆盖关系见
+[Requirements traceability](docs/requirements_traceability.md)。
+
+---
+
+## 原有独立动作工具
+
 现有 AUBO Python SDK 连接代码已整理为可复用模块，并提供只读诊断和默认 dry-run 的小范围关节测试工具。
 
 > 安全提示：本项目不能替代 AUBO 官方安全功能、风险评估或现场监护。首次真机测试必须由熟悉设备的人员在场，保持急停可达，并清空机械臂工作空间。
 
-## 当前环境
+## Python 环境
 
-已检测到的本机解释器：
-
-```text
-Python 3.11.15
-pyaubo-sdk 0.24.1
-```
-
-PowerShell 中当前没有全局 `python` 命令，因此下面示例使用解释器绝对路径。也可以在 PyCharm 中继续选择名为 `aubo` 的解释器。
+研究部署以 Ubuntu 20.04 x86-64、Conda CPython 3.10 和仓库内锁定的
+`pyaubo-sdk 0.24.1` 为准。本节保留的 PowerShell 命令仅用于原有独立工具；
+正式研究应使用上方 Ubuntu `aubo` Conda 环境和 `study` 服务。
 
 ## 目录
 
@@ -200,16 +384,15 @@ M0 当前包含：
 - 上电/启动后重新读取并验证目标；
 - 低速度、低加速度配置。
 
-当前还没有实现控制器级急停，也没有通过 Python 对机械臂施加硬实时安全保证。急停、保护停止和控制器自身安全机制仍然是最终防线。
+原有独立动作工具没有控制器级急停。新的研究运行时会绕过普通动作队列调用
+SDK `stopJoint`，但 Python 和网络调用不提供硬实时保证；实体急停、保护停止和
+控制器自身安全机制仍然是最终防线。
 
-## 8. 下一阶段
+## 8. 研究系统范围
 
-详见 [完整实施计划](docs/implementation_plan.md)。下一阶段 M1 是：
-
-```text
-Ubuntu 22.04 + ROS 2 Humble + AUBO ES3描述包
-+ ros2_control FakeSystem + RViz + MoveIt 2
-```
+本研究不要求ROS 2、MoveIt、Gazebo、三维仿真、视觉分拣、模仿学习或强化学习。
+[早期完整实施计划](docs/implementation_plan.md)仅作为历史路线图保留，不属于当前
+HCI猜杯研究系统的交付范围。
 ## 9. 全身点头动作
 
 直接运行根目录的 `main.py`，在菜单中选择第 3 项；或者使用统一入口子命令：

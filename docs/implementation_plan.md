@@ -1,4 +1,15 @@
-# AUBO ES3 仿真与智能化实施计划
+# AUBO ES3 仿真与智能化实施计划（历史提案，已停止）
+
+> **状态：不再执行。** 本文件记录的是早期设想，不表示其中的勾选项已经实现，
+> 也不属于当前 HCI 猜杯研究系统的待办事项。项目明确不开发 ROS 2/MoveIt、
+> Gazebo 或其他三维仿真、视觉分拣、模仿学习、强化学习或 VLA。
+> 当前实现范围、部署步骤和验收状态以
+> [`study_system.md`](study_system.md)、[`requirements_traceability.md`](requirements_traceability.md)
+> 和仓库根目录 [`README.md`](../README.md) 为准。
+> 本历史提案中出现的 Ubuntu 22.04 也是已停止路线的原始记录；当前实际部署目标
+> 已改为 Ubuntu 20.04 + Conda Python 3.10。
+
+以下内容仅为历史记录，不应据此安排开发或部署。
 
 ## 1. 项目目标
 

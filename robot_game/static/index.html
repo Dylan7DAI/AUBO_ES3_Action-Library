@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AUBO ES3 · Research Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">RARE LAB · RESEARCHER ONLY</span><h1>AUBO ES3 Study Console</h1></div>
+    <div class="connection"><i id="connectionDot"></i><span id="connectionText">Disconnected</span></div>
+  </header>
+  <main>
+    <section class="hero panel">
+      <div><span class="label">Current stage</span><strong id="stage">NO SESSION</strong></div>
+      <div><span class="label">Condition</span><strong id="condition">—</strong></div>
+      <div><span class="label">Round</span><strong id="round">—</strong></div>
+      <div><span class="label">Robot</span><strong id="robotMode">—</strong></div>
+      <div><span class="label">Safety</span><strong id="safetyMode">—</strong></div>
+      <div><span class="label">Current action</span><strong id="lastAction">—</strong></div>
+      <div><span class="label">End request</span><strong id="endStatus">Not queued</strong></div>
+    </section>
+
+    <section class="layout">
+      <div class="stack">
+        <article class="panel" id="sessionPanel">
+          <h2>Session setup</h2>
+          <div class="form-grid">
+            <label>Participant ID<input id="participantId" autocomplete="off" placeholder="P001"></label>
+            <label>Session ID<input id="sessionId" autocomplete="off" placeholder="S001"></label>
+            <label>Condition<select id="conditionInput"><option value="task">Task-only</option><option value="rule">History-aware rule</option><option value="llm">LLM-based</option></select></label>
+            <label>Researcher token<input id="token" type="password" autocomplete="off" placeholder="Optional on localhost"></label>
+          </div>
+          <label class="check"><input id="formalStudy" type="checkbox"> Formal-study mode (must match server lock)</label>
+          <button class="primary" id="startSession">Start locked session</button>
+        </article>
+
+        <article class="panel">
+          <h2>Round controls</h2>
+          <p class="hint">Controls unlock only in their legal state. Every click receives an explicit acknowledgement or error.</p>
+          <div class="action-block">
+            <span class="step">01 · USER READY</span>
+            <button data-command="user_setup_done" data-stages="WAIT_USER_SETUP">User finished shuffling / Ready</button>
+          </div>
+          <div class="action-block">
+            <span class="step">02 · ROBOT CHOICE</span>
+            <div class="button-row">
+              <button data-command="select_cup" data-payload='{"cup_id":1}' data-stages="WAIT_CUP_SELECTION">Cup 1</button>
+              <button data-command="select_cup" data-payload='{"cup_id":2}' data-stages="WAIT_CUP_SELECTION">Cup 2</button>
+              <button data-command="select_cup" data-payload='{"cup_id":3}' data-stages="WAIT_CUP_SELECTION">Cup 3</button>
+            </div>
+          </div>
+          <div class="action-block">
+            <span class="step">03 · OBSERVED RESULT</span>
+            <div class="button-row">
+              <button class="success" data-command="result" data-payload='{"outcome":"win"}' data-stages="WAIT_RESULT">Robot guessed correctly</button>
+              <button class="muted-danger" data-command="result" data-payload='{"outcome":"loss"}' data-stages="WAIT_RESULT">Robot guessed incorrectly</button>
+            </div>
+          </div>
+          <div class="action-block">
+            <span class="step">OPTIONAL · USER RESPONSE LABELS</span>
+            <div class="tags" id="responseTags">
+              <label><input type="checkbox" value="encouragement"> Encouragement</label>
+              <label><input type="checkbox" value="hint"> Hint</label>
+              <label><input type="checkbox" value="help"> Help</label>
+              <label><input type="checkbox" value="difficulty_reduction"> Difficulty reduction</label>
+              <label><input type="checkbox" value="none"> None</label>
+            </div>
+            <button id="sendLabels">Record labels</button>
+          </div>
+        </article>
+      </div>
+
+      <aside class="stack">
+        <article class="panel safety-panel">
+          <h2>Session & safety</h2>
+          <button class="warning" data-command="end_after_round" data-payload="{}" data-stages="WAIT_USER_SETUP,PRE_TASK_EXPRESSION,WAIT_CUP_SELECTION,TASK_PICK,WAIT_RESULT,TASK_PLACE,POST_RESULT_EXPRESSION,ROUND_CLOSE,INTER_ROUND_WAIT">End after current round</button>
+          <button class="warning" data-command="abort_session" data-payload='{"reason":"researcher_aborted_session"}' data-confirm="Abort this session and issue a software stop?" data-stages="WAIT_USER_SETUP,PRE_TASK_EXPRESSION,WAIT_CUP_SELECTION,TASK_PICK,WAIT_RESULT,TASK_PLACE,POST_RESULT_EXPRESSION,ROUND_CLOSE,INTER_ROUND_WAIT">Abort session</button>
+          <button class="danger" id="emergencyStop">EMERGENCY STOP</button>
+          <p class="danger-note">Software stop does not replace the physical emergency-stop button.</p>
+        </article>
+        <article class="panel pilot-only" id="pilotPanel">
+          <h2>Pilot diagnostics</h2>
+          <p class="hint">Manual actions invalidate the current pilot round and are disabled in formal-study mode.</p>
+          <label>Registered fixed action
+            <select id="pilotFunction">
+              <option value="greet">Greeting</option>
+              <option value="observe_hesitate">Observe / hesitate</option>
+              <option value="positive_reaction">Positive reaction</option>
+              <option value="negative_reaction">Negative reaction</option>
+              <option value="farewell">Farewell</option>
+              <option value="neutral_wait">Neutral wait</option>
+            </select>
+          </label>
+          <button id="pilotAction" data-stages="WAIT_USER_SETUP,WAIT_CUP_SELECTION,WAIT_RESULT">Run fixed pilot action</button>
+          <button class="warning" data-command="reset_error" data-payload="{}" data-stages="ERROR">Reset mock error</button>
+        </article>
+        <article class="panel">
+          <h2>Session metrics</h2>
+          <div class="metrics"><div><span>Wins</span><b id="wins">0</b></div><div><span>Losses</span><b id="losses">0</b></div></div>
+          <div class="meta"><span>Participant</span><code id="participant">—</code><span>Session</span><code id="session">—</code><span>Config</span><code id="configVersion">—</code></div>
+        </article>
+        <article class="panel">
+          <h2>Latest validated plan</h2>
+          <pre id="planDetails">No validated plan yet.</pre>
+          <span class="label diagnostic-label">Current error</span>
+          <p id="errorDetails" class="error-details">None</p>
+        </article>
+        <article class="panel log-panel">
+          <div class="panel-title"><h2>Live event stream</h2><button class="small" id="clearLog">Clear view</button></div>
+          <ol id="events"></ol>
+        </article>
+      </aside>
+    </section>
+  </main>
+  <div id="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

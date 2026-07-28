@@ -58,6 +58,7 @@ def print_help() -> None:
   python main.py joint [参数]            小范围关节测试
   python main.py nod [参数]              点头动作
   python main.py cup [参数]              水杯往返动作
+  python main.py study [参数]            研究人员 WoZ Web 控制台
 
 常用示例：
   python main.py diagnose --json
@@ -70,6 +71,7 @@ def print_help() -> None:
   python main.py joint --help
   python main.py nod --help
   python main.py cup --help
+  python main.py study --help
 """
     )
 
@@ -88,6 +90,9 @@ def dispatch_cli(argv: Sequence[str]) -> int:
         "nod": nod_main,
         "cup": cup_main,
     }
+    if command.lower() == "study":
+        from robot_game.app import main as study_main
+        return int(study_main(tool_args))
     tool = tools.get(command.lower())
     if tool is None:
         print(f"未知功能：{command}", file=sys.stderr)

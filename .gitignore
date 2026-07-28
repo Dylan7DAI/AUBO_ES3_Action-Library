@@ -1,4 +1,4 @@
-﻿# Python
+﻿# Python / Conda
 __pycache__/
 *.py[cod]
 *.pyd
@@ -13,6 +13,7 @@ venv/
 .env.local
 config/robot.local.json
 config/*.local.json
+config/study.local.json
 
 # IDE / OS
 .idea/
@@ -32,3 +33,7 @@ datasets/
 models/*.pt
 models/*.pth
 models/*.onnx
+logs/
+
+# Download caches (the pinned AUBO Linux wheel is intentionally tracked)
+vendor/wheels/

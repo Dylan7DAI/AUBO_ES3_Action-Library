@@ -1,0 +1,22 @@
+[Unit]
+Description=AUBO ES3 HCI Study Research Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aubo-study
+Group=aubo-study
+WorkingDirectory=/opt/aubo-es3-study
+EnvironmentFile=/etc/aubo-es3-study.env
+# Adjust /opt/miniconda3 if Conda is installed elsewhere for the service account.
+ExecStart=/opt/miniconda3/bin/conda run --no-capture-output --name aubo python main.py study --study-config config/study.local.json --robot-config config/robot.local.json --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/aubo-es3-study/logs
+
+[Install]
+WantedBy=multi-user.target

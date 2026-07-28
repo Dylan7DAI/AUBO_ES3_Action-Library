@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from .config import RobotConfig
@@ -24,6 +25,13 @@ class RobotSnapshot:
     power_on: bool
     joint_positions_rad: tuple[float, ...]
     tcp_pose: tuple[float, ...]
+    sdk_version: str = "unknown"
+    robot_mode: str = "unknown"
+    safety_mode: str = "unknown"
+    steady: bool | None = None
+    collision_occurred: bool | None = None
+    within_safety_limits: bool | None = None
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
 
 class AuboClient:
@@ -145,16 +153,74 @@ class AuboClient:
             )
 
     def snapshot(self) -> RobotSnapshot:
-        """读取并冻结当前上电状态、关节角和 TCP 位姿。"""
+        """读取并冻结状态及所有可用的软件安全遥测。
+
+        不同控制器/SDK 版本公开的状态字段并不完全一致。基础字段失败会让
+        整次采样失败；扩展安全字段逐项读取并把不支持项记为 ``None``，让
+        上层日志既完整又不会因旧固件缺少单个接口而中断。
+        """
 
         robot = self._require_robot()
         try:
             state = robot.getRobotState()
+            def read(method_name: str) -> Any:
+                method = getattr(state, method_name, None)
+                if method is None:
+                    return None
+                try:
+                    value = method()
+                    if isinstance(value, (list, tuple)):
+                        return [float(item) for item in value]
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        return value
+                    return str(value)
+                except Exception as exc:  # Preserve unsupported/read-error detail in logs.
+                    return {"read_error": str(exc)}
+
+            try:
+                sdk_version = version("pyaubo-sdk")
+            except PackageNotFoundError:
+                sdk_version = "unknown"
+
+            telemetry_methods = {
+                "joint_speeds_rad_s": "getJointSpeeds",
+                "joint_accelerations_rad_s2": "getJointAccelerations",
+                "joint_torque_sensors": "getJointTorqueSensors",
+                "joint_contact_torques": "getJointContactTorques",
+                "joint_currents_a": "getJointCurrents",
+                "joint_voltages_v": "getJointVoltages",
+                "joint_temperatures_c": "getJointTemperatures",
+                "tcp_speed": "getTcpSpeed",
+                "tcp_force": "getTcpForce",
+                "tcp_force_sensors": "getTcpForceSensors",
+                "control_box_temperature_c": "getControlBoxTemperature",
+                "control_box_humidity_percent": "getControlBoxHumidity",
+                "main_voltage_v": "getMainVoltage",
+                "main_current_a": "getMainCurrent",
+                "robot_voltage_v": "getRobotVoltage",
+                "robot_current_a": "getRobotCurrent",
+                "slow_down_level": "getSlowDownLevel",
+                "teach_pendant_enabled": "isTeachPendantEnabled",
+                "tool_flange_enabled": "isToolFlangeEnabled",
+            }
+            telemetry = {name: read(method) for name, method in telemetry_methods.items()}
+            robot_mode = read("getRobotModeType")
+            safety_mode = read("getSafetyModeType")
+            steady = read("isSteady")
+            collision = read("isCollisionOccurred")
+            within_limits = read("isWithinSafetyLimits")
             return RobotSnapshot(
                 robot_name=self.robot_name or "unknown",
                 power_on=bool(state.isPowerOn()),
                 joint_positions_rad=tuple(float(v) for v in state.getJointPositions()),
                 tcp_pose=tuple(float(v) for v in state.getTcpPose()),
+                sdk_version=sdk_version,
+                robot_mode=str(robot_mode),
+                safety_mode=str(safety_mode),
+                steady=steady if isinstance(steady, bool) else None,
+                collision_occurred=collision if isinstance(collision, bool) else None,
+                within_safety_limits=within_limits if isinstance(within_limits, bool) else None,
+                telemetry=telemetry,
             )
         except Exception as exc:
             raise AuboClientError(f"读取机器人状态失败：{exc}") from exc
@@ -196,5 +262,40 @@ class AuboClient:
         except Exception as exc:
             raise AuboClientError(f"moveJoint 下发失败：{exc}") from exc
 
+    def stop_motion(self, deceleration_rad_s2: float = 1.0) -> Any:
+        """立即请求关节空间停止；此软件调用不能替代实体急停。"""
 
+        robot = self._require_robot()
+        deceleration = float(deceleration_rad_s2)
+        if deceleration <= 0:
+            raise AuboClientError("停止减速度必须大于 0。")
+        try:
+            motion = robot.getMotionControl()
+            result = motion.stopJoint(deceleration)
+        except Exception as exc:
+            raise AuboClientError(f"stopJoint 下发失败：{exc}") from exc
+        if type(result) is int and result != 0:
+            raise AuboClientError(f"stopJoint 返回错误码 {result}。")
+        return result
+
+    def set_standard_digital_output(self, index: int, value: bool) -> Any:
+        """Set one controller standard digital output for a configured gripper adapter."""
+
+        robot = self._require_robot()
+        try:
+            result = robot.getIoControl().setStandardDigitalOutput(int(index), bool(value))
+        except Exception as exc:
+            raise AuboClientError(f"设置标准数字输出 DO{index} 失败：{exc}") from exc
+        if type(result) is int and result != 0:
+            raise AuboClientError(f"设置标准数字输出 DO{index} 返回错误码 {result}。")
+        return result
+
+    def get_standard_digital_input(self, index: int) -> bool:
+        """Read one controller standard digital input used as optional gripper feedback."""
+
+        robot = self._require_robot()
+        try:
+            return bool(robot.getIoControl().getStandardDigitalInput(int(index)))
+        except Exception as exc:
+            raise AuboClientError(f"读取标准数字输入 DI{index} 失败：{exc}") from exc
 

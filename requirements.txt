@@ -1,2 +1,7 @@
-﻿# The vendor SDK is already installed in the project's `aubo` Conda environment.
-pyaubo-sdk==0.24.1
+# Ubuntu 20.04 deployment uses Conda Python 3.10 rather than the system Python 3.8.
+# The pinned Linux wheel is also stored in vendor/pyaubo_sdk for offline deployment.
+pyaubo-sdk==0.24.1; platform_system == "Linux" and platform_machine == "x86_64"
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+openai==2.46.0
