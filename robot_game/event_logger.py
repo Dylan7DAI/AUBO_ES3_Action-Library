@@ -1,4 +1,4 @@
-"""Append-only, hash-chained JSONL experiment logging and readable runtime logs."""
+"""追加写入的哈希链实验日志，以及便于现场排查的文本运行日志。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def safe_id(value: str) -> str:
 
 
 class EventLogger:
-    """Writes append-only, tamper-evident events plus a readable diagnostic log."""
+    """写入可检测篡改的事件链，同时生成便于阅读的诊断日志。"""
 
     def __init__(
         self,
@@ -76,6 +76,7 @@ class EventLogger:
         round_id: int | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
+        # 多个 asyncio task 和工作线程可能同时产生日志，必须串行更新 sequence/hash。
         with self._lock:
             self._sequence += 1
             record: dict[str, Any] = {
@@ -92,6 +93,7 @@ class EventLogger:
                 "data": data or {},
                 "previous_hash": self._previous_hash,
             }
+            # 当前记录包含前一条 hash；修改、插入或重排中间记录都会破坏后续链条。
             canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             record["record_hash"] = digest
@@ -99,6 +101,7 @@ class EventLogger:
             with self.events_path.open("a", encoding="utf-8") as stream:
                 stream.write(line)
                 stream.flush()
+                # 每条事件立即落盘，降低断电或进程崩溃时丢失实验记录的范围。
                 os.fsync(stream.fileno())
             self._previous_hash = digest
             log_method = getattr(self.runtime, level.lower(), self.runtime.info)

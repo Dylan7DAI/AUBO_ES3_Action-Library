@@ -1,4 +1,4 @@
-"""FastAPI HTTP/WebSocket service for the researcher Wizard-of-Oz console."""
+"""研究人员 WoZ 控制台的 FastAPI HTTP/WebSocket 服务。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ STATIC = Path(__file__).resolve().parent / "static"
 
 
 class ConnectionHub:
+    """管理研究人员 WebSocket，并保证同一连接的消息不会并发写入。"""
+
     def __init__(self) -> None:
         self.connections: set[Any] = set()
         self.send_locks: dict[Any, asyncio.Lock] = {}
@@ -82,6 +84,7 @@ def create_app(
     # remain optional for pure core tests, but the WebSocket type must be visible.
     globals()["WebSocket"] = WebSocket
 
+    # 配置和 SessionManager 在进程启动时创建；一次运行只加载一份锁定配置。
     config = load_study_config(study_config_path)
     hub = ConnectionHub()
     manager = SessionManager(config, robot_config_path, hub.broadcast)
@@ -126,6 +129,7 @@ def create_app(
     ) -> dict[str, Any]:
         if not authorized(x_researcher_token):
             raise HTTPException(status_code=401, detail="Invalid researcher token")
+        # 创建会话会同步完成机器人连接和开场表达，成功后才向页面返回状态。
         try:
             state = await manager.start_session(
                 str(body.get("participant_id", "")), str(body.get("session_id", "")),
@@ -145,6 +149,8 @@ def create_app(
         tasks: set[asyncio.Task[Any]] = set()
 
         async def process(raw: Any) -> None:
+            """处理一条命令，并用 request_id 关联 ACK 或错误响应。"""
+
             request_id = raw.get("request_id") if isinstance(raw, dict) else None
             try:
                 command = WozCommand.from_dict(raw)
@@ -163,6 +169,7 @@ def create_app(
         try:
             while True:
                 raw = await websocket.receive_json()
+                # 每条命令用独立 task 处理，使长动作期间仍能接收急停消息。
                 task = asyncio.create_task(process(raw))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)

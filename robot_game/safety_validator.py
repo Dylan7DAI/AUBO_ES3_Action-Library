@@ -1,4 +1,4 @@
-"""Strict whitelist, phase, range, duration, calibration, and robot-state checks."""
+"""表达白名单、参数范围、时长和机器人运行状态的统一安全校验。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ class StudySafetyError(ValueError):
     pass
 
 
+# 第一层白名单：即使策略或 LLM 给出已注册函数，也必须适合当前实验阶段。
 ALLOWED_BY_STAGE: dict[Stage, set[str]] = {
     Stage.SESSION_OPEN: {"greet", "neutral_wait"},
     Stage.PRE_TASK_EXPRESSION: {"observe_hesitate", "neutral_wait"},
@@ -23,6 +24,7 @@ ALLOWED_BY_STAGE: dict[Stage, set[str]] = {
 }
 
 
+# 每个语义动作参数的唯一边界来源；LLM Schema 也从这里动态生成。
 PARAMETER_RULES: dict[str, dict[str, tuple[float, float] | set[Any]]] = {
     "greet": {
         "intensity": (0.0, 1.0), "lift_m": (0.04, 0.15), "user_yaw_rad": (-0.44, 0.44),
@@ -52,6 +54,7 @@ PARAMETER_RULES: dict[str, dict[str, tuple[float, float] | set[Any]]] = {
 }
 
 
+# Rule、pilot 和缺省字段共享的安全默认值。
 DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
     "greet": {"intensity": 0.5, "lift_m": 0.07, "user_yaw_rad": 0.08, "sway_rad": 0.07,
               "sway_count": 1, "speed_scale": 0.35, "accel_scale": 0.35, "hold_s": 0.3},
@@ -70,6 +73,8 @@ DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
 
 
 class SafetyValidator:
+    """把每项校验结果写入日志，失败时在下发运动前终止流程。"""
+
     def __init__(self, config: StudyConfig, logger: EventLogger):
         self.config = config
         self.logger = logger
@@ -93,6 +98,7 @@ class SafetyValidator:
         if unknown:
             raise StudySafetyError(f"Unknown parameters for {plan.function}: {', '.join(unknown)}")
 
+        # 先复制默认值再覆盖请求参数，避免修改全局默认字典。
         values = deepcopy(DEFAULT_PARAMETERS[plan.function])
         values.update(plan.parameters)
         for name, rule in rules.items():
@@ -137,6 +143,7 @@ class SafetyValidator:
         return movement_segments * 0.35 / speed + holds
 
     def validate_robot_snapshot(self, snapshot: Any, round_id: int) -> None:
+        # 每个运动目标前都会重新读取快照；不能只依赖会话启动时的状态。
         checks = {
             "power_on": bool(snapshot.power_on),
             "steady": snapshot.steady is True,

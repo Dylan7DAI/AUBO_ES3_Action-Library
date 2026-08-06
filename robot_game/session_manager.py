@@ -1,4 +1,4 @@
-"""Creates and owns one active experimental session at a time."""
+"""创建并持有唯一活跃实验会话，负责装配各层组件。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ class SessionManagerError(RuntimeError):
 
 
 class SessionManager:
+    """Web 层与单个 GameStateMachine 之间的会话生命周期管理器。"""
+
     def __init__(
         self,
         config: StudyConfig,
@@ -50,6 +52,7 @@ class SessionManager:
     async def start_session(
         self, participant_id: str, session_id: str, condition_value: str, formal_study: bool
     ) -> dict[str, Any]:
+        # 加锁避免两个浏览器几乎同时创建会话，导致共享同一台机械臂。
         async with self._start_lock:
             if self.machine and self.machine.state.stage.value not in {"FINISHED", "ERROR"}:
                 raise SessionManagerError("Another session is active")
@@ -69,6 +72,7 @@ class SessionManager:
                 raise SessionManagerError(
                     "Requested formal_study does not match the locked runtime configuration"
                 )
+            # 正式实验的条件由预注册表决定，页面传入值不能覆盖实验分组。
             if formal_study:
                 assigned = self.config.formal_condition_for(participant, session)
                 if assigned is None:
@@ -81,6 +85,7 @@ class SessionManager:
                     )
             loop = asyncio.get_running_loop()
 
+            # EventLogger 可能从工作线程写事件，因此通过线程安全入口交回 asyncio 循环。
             def publish_event(record: dict[str, Any]) -> None:
                 payload = {
                     "type": "system.event",
@@ -103,6 +108,7 @@ class SessionManager:
                 event_sink=publish_event,
             )
             try:
+                # 在一个位置完成依赖装配：条件策略 → 硬件适配器 → 校验器 → 执行器 → 状态机。
                 strategy = build_strategy(condition, self.config, logger)
                 adapter, gripper = build_adapter(self.config, self.robot_config_path)
                 validator = SafetyValidator(self.config, logger)

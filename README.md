@@ -182,6 +182,8 @@ python scripts/run_mock_acceptance.py
 
 完整架构、消息协议、配置和现场投产步骤见
 [研究系统部署与校准指南](docs/study_system.md)。
+用于组内讲解、情感动作调参与 WoZ 现场操作的中文说明见
+[代码架构、情感动作调试与 WoZ 实验指南](docs/CODE_ARCHITECTURE_WOZ_GUIDE_CN.md)。
 每个维护文件的职责见 [Project file guide](FILE_GUIDE.md)，需求覆盖关系见
 [Requirements traceability](docs/requirements_traceability.md)。
 

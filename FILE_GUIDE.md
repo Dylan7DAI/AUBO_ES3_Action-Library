@@ -82,6 +82,7 @@ excluded from version control.
 
 | File | Purpose |
 |---|---|
+| `docs/CODE_ARCHITECTURE_WOZ_GUIDE_CN.md` | Chinese presentation-ready code architecture summary, emotion-motion parameter mapping, mock/real usage, WoZ runbook, troubleshooting, and experiment checklist. |
 | `docs/study_system.md` | Architecture, protocol, safety/logging behavior, Ubuntu deployment, workcell calibration, LLM endpoint contract, and hardware acceptance gates. |
 | `docs/requirements_traceability.md` | Requirement-to-code/test matrix for the supplied v0.9 research specification. |
 | `docs/safety_checklist.md` | Original pre-run software, workcell, execution, and post-run physical safety checklist. |

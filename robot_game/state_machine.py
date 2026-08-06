@@ -1,4 +1,8 @@
-"""Strict multi-round game state machine driven by explicit WoZ events."""
+"""由 WoZ 事件驱动的严格多轮游戏状态机。
+
+状态机负责“什么时候做什么”，但不自己生成或下发关节运动：表达计划交给策略层，
+所有机械臂动作交给 RobotExecutor。
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,8 @@ Broadcast = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class GameStateMachine:
+    """串联会话阶段、每轮临时数据、表达策略、任务动作和实验日志。"""
+
     def __init__(
         self,
         state: SessionState,
@@ -42,6 +48,8 @@ class GameStateMachine:
         self._invalid_reason: str | None = None
 
     async def start(self) -> None:
+        """连接机器人、执行开场表达，并进入第一轮的用户准备阶段。"""
+
         self.logger.event(
             "session", "started", data={
                 "participant_id": self.state.participant_id,
@@ -68,6 +76,9 @@ class GameStateMachine:
             raise
 
     async def handle(self, command: WozCommand) -> dict[str, Any]:
+        """校验并分发一个 WoZ 命令，返回可公开给前端的最新状态。"""
+
+        # 急停必须绕过普通命令锁；正常结束请求也应能在长动作期间及时排队。
         if command.command in {"emergency_stop", "end_after_round"}:
             self._validate_envelope(command)
             self._log_command_received(command)
@@ -82,6 +93,7 @@ class GameStateMachine:
                 self._log_command_error(command, exc)
                 raise
 
+        # 其他命令串行处理，防止连续点击导致两个状态转换同时进行。
         async with self._command_lock:
             self._validate_envelope(command)
             self._log_command_received(command)
@@ -179,6 +191,8 @@ class GameStateMachine:
         return self.state.public_dict()
 
     async def _result(self, command: WozCommand) -> dict[str, Any]:
+        """记录本轮输赢，放杯、执行结果表达，并结束或创建下一轮。"""
+
         self._require(Stage.WAIT_RESULT)
         try:
             outcome = Outcome(str(command.payload.get("outcome")))
@@ -217,11 +231,13 @@ class GameStateMachine:
         })
         self.logger.event("round", "completed", round_id=self.state.round_id, data=round_data)
         self._write_summary()
+        # end_after_round 只设置标志；必须在当前轮完整记录后才能正常关闭会话。
         if self.state.end_requested:
             await self._close_session("end_after_round")
         else:
             await self._transition(Stage.INTER_ROUND_WAIT, "round_recorded")
             await asyncio.sleep(self.config.inter_round_wait_s * self.config.time_scale)
+            # 下一轮只清空轮内临时状态，history 保留给 Rule/LLM 作为多轮上下文。
             self.state.round_id += 1
             self.state.selected_cup = None
             self.state.pending_outcome = None
@@ -233,9 +249,13 @@ class GameStateMachine:
         return self.state.public_dict()
 
     async def _expression(self, stage: Stage) -> None:
+        """向当前条件策略请求表达计划，校验后交给执行器。"""
+
         try:
             requested = await self.strategy.plan(stage, self.state)
         except LLMFailure as exc:
+            # LLM 两次尝试都失败时不改用规则动作，避免污染实验条件；
+            # 使用安全的中性等待，并把本轮明确标为无效。
             self._invalid_reason = f"LLM_FAILURE: {exc}"
             self.logger.event(
                 "error", "llm_failure_neutral_fallback", level="ERROR", round_id=self.state.round_id,
@@ -272,6 +292,7 @@ class GameStateMachine:
         return self.state.public_dict()
 
     async def _emergency(self, command: WozCommand) -> dict[str, Any]:
+        # RobotExecutor.emergency_stop 会绕过普通运动队列；这里负责把实验状态锁进 ERROR。
         self._validate_envelope(command)
         reason = str(command.payload.get("reason", "researcher_requested"))[:500]
         try:
@@ -394,6 +415,8 @@ class GameStateMachine:
             raise StateTransitionError("Action was interrupted by an emergency stop")
 
     async def _transition(self, target: Stage, reason: str) -> None:
+        """执行一次可审计的状态切换，并立即广播给所有研究人员页面。"""
+
         previous = self.state.stage
         self.state.stage = target
         self.logger.event(

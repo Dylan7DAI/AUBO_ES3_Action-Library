@@ -1,4 +1,4 @@
-"""Study configuration loading, validation, and immutable fingerprints."""
+"""加载并校验研究配置，同时生成用于实验追溯的不可变指纹。"""
 
 from __future__ import annotations
 
@@ -82,6 +82,8 @@ def _resolve_prompt_path(config_path: Path, configured_value: str) -> Path:
 
 
 def load_study_config(path: str | Path = "config/study.example.json") -> StudyConfig:
+    """在连接机器人前拒绝危险或不完整配置，并返回只读配置对象。"""
+
     config_path = Path(path).expanduser().resolve()
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
@@ -140,6 +142,7 @@ def load_study_config(path: str | Path = "config/study.example.json") -> StudyCo
     calibrated = bool(workcell.get("calibrated", False))
     expressive_calibrated = bool(workcell.get("expressive_calibrated", False))
     gripper_type = str(workcell.get("gripper", {}).get("type", "unsupported"))
+    # 真机门必须在创建 AuboRobotAdapter 之前通过，不能靠运行中警告代替。
     if robot_mode == "real" and not calibrated:
         raise StudyConfigError("Real mode is blocked until workcell.calibrated=true")
     if robot_mode == "real" and not expressive_calibrated:
@@ -212,6 +215,7 @@ def load_study_config(path: str | Path = "config/study.example.json") -> StudyCo
         if not str(llm.get("endpoint", "")).strip() or not str(llm.get("model", "")).strip():
             raise StudyConfigError("http_json LLM requires both llm.endpoint and llm.model")
 
+    # 对排序后的完整配置取 hash，使每场日志可以追溯到精确配置内容。
     canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return StudyConfig(

@@ -1,4 +1,4 @@
-"""Typed experiment, command, action, and state models."""
+"""实验条件、状态、轮次、动作计划和 WoZ 命令的数据模型。"""
 
 from __future__ import annotations
 
@@ -69,6 +69,8 @@ class RoundRecord:
 
 @dataclass
 class SessionState:
+    """一场会话的内存状态；history 跨轮保留，pending 字段每轮重置。"""
+
     participant_id: str
     session_id: str
     condition: Condition
@@ -128,6 +130,8 @@ class SessionState:
 
 @dataclass(frozen=True)
 class WozCommand:
+    """浏览器发来的命令信封；request_id 用于关联 ACK，round_id 防止旧命令串轮。"""
+
     command: str
     request_id: str
     payload: dict[str, Any]

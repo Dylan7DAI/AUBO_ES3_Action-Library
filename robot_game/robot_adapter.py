@@ -1,4 +1,4 @@
-"""Mock and real AUBO adapters plus a single serialized motion executor."""
+"""Mock/真机适配器，以及研究系统唯一的串行运动执行器。"""
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ class RobotAdapter(Protocol):
 
 
 class MockRobotAdapter:
+    """只在内存中更新关节值，用于不连接硬件的完整流程测试。"""
+
     mode = "mock"
 
     def __init__(self, initial_joints: Sequence[float] = (0, 0, 0, 0, 0, 0)):
@@ -75,6 +77,8 @@ class MockRobotAdapter:
 
 
 class AuboRobotAdapter:
+    """把研究系统需要的最小接口转换为底层 AuboClient 调用。"""
+
     mode = "real"
 
     def __init__(self, robot_config_path: str | Path):
@@ -128,7 +132,7 @@ class UnsupportedGripperAdapter:
 
 
 class DigitalOutputGripperAdapter:
-    """Generic two-state gripper driven by one controller DO and optional DI feedback."""
+    """由一个控制器 DO 驱动、可选 DI 反馈的两态夹爪。"""
 
     def __init__(self, adapter: AuboRobotAdapter, settings: dict[str, Any]):
         self.adapter = adapter
@@ -161,7 +165,7 @@ class DigitalOutputGripperAdapter:
         return result
 
 class RobotExecutor:
-    """The only component allowed to issue motion; regular commands are serialized."""
+    """研究系统唯一允许下发运动的组件；所有普通动作必须串行。"""
 
     def __init__(
         self,
@@ -205,7 +209,7 @@ class RobotExecutor:
         self.logger.event("robot", "disconnected")
 
     async def emergency_stop(self, reason: str, round_id: int) -> None:
-        """Bypasses the normal motion queue so it can stop the active action."""
+        """绕过普通运动队列请求 stopJoint，以便打断正在执行的动作。"""
         self._stopped = True
         self.logger.event(
             "safety", "emergency_stop_requested", level="CRITICAL", round_id=round_id,
@@ -226,6 +230,8 @@ class RobotExecutor:
             raise
 
     async def execute_expression(self, plan: ActionPlan, round_id: int) -> None:
+        """把已校验的语义表达计划渲染为相对关节目标并依次执行。"""
+
         if self._stopped:
             raise RobotAdapterError("Motion is disabled after emergency stop")
         async with self._motion_lock:
@@ -243,6 +249,7 @@ class RobotExecutor:
                         float(plan.parameters["duration_s"]) * self.config.time_scale
                     )
                 else:
+                    # LLM/Rule 只产生语义参数；真正的六关节目标只在本地渲染。
                     targets = self._expression_targets(before.joint_positions_rad, plan)
                     self.logger.event(
                         "action", "motion_rendered", round_id=round_id,
@@ -272,6 +279,7 @@ class RobotExecutor:
                 raise
 
     async def execute_pick(self, cup_id: int, round_id: int) -> None:
+        # 三种实验条件共用同一固定任务路径，条件差异不会改变抓杯动作。
         async with self._motion_lock:
             self._log_calibration_gate("task", round_id)
             sequence = [f"cup_{cup_id}_pre", f"cup_{cup_id}_pick"]
@@ -311,6 +319,7 @@ class RobotExecutor:
     async def _move(
         self, target: Sequence[float], parameters: dict[str, Any], round_id: int, label: str
     ) -> None:
+        # 每个目标下发前重新读取状态，防止使用上一个动作之前的过期关节位置。
         snapshot = await asyncio.to_thread(self.adapter.snapshot)
         self.validator.validate_robot_snapshot(snapshot, round_id)
         target_values = tuple(float(item) for item in target)
@@ -386,10 +395,14 @@ class RobotExecutor:
             raise RobotAdapterError(f"moveJoint returned error code {result}")
 
     def _expression_targets(self, start: Sequence[float], plan: ActionPlan) -> list[tuple[float, ...]]:
+        """把动作模板和语义参数转换为最终会送入 moveJoint 的目标序列。"""
+
         templates = self.config.workcell.get("expressive_joint_offsets_rad", {})
         offset = templates.get(plan.function)
         if not isinstance(offset, list) or len(offset) != 6:
             raise RobotAdapterError(f"No calibrated joint template for {plan.function}")
+        # intensity 与空间参数共同决定模板总体幅度；带 _m 的字段在当前实现中
+        # 只是归一化语义控制量，不表示 TCP 一定移动对应的物理米数。
         intensity = float(plan.parameters.get("intensity", 0.5))
         spatial_values = [
             float(plan.parameters[name]) / maximum
@@ -402,6 +415,8 @@ class RobotExecutor:
         spatial_scale = sum(abs(item) for item in spatial_values) / len(spatial_values) if spatial_values else 0.5
         scale = min(1.0, max(0.2, 0.35 + 0.35 * intensity + 0.3 * spatial_scale))
         primary_values = [float(a) + float(b) * scale for a, b in zip(start, offset)]
+
+        # 朝向和腕部参数只通过受控系数影响指定关节，LLM 不能直接给关节角。
         yaw = float(plan.parameters.get(
             "user_yaw_rad", plan.parameters.get(
                 "orient_user_rad", -plan.parameters.get("turn_away_rad", 0.0)
@@ -413,6 +428,7 @@ class RobotExecutor:
         primary_values[4] += wrist * 0.25
         primary_values[5] -= yaw * 0.18
         primary = tuple(primary_values)
+        # inverse 位于起点的反方向，用于形成摆动/复查；最后始终追加 start 回到动作起点。
         inverse = tuple(float(a) - (float(b) - float(a)) * 0.35 for a, b in zip(start, primary))
         count = int(plan.parameters.get("sway_count", plan.parameters.get("recheck_count", 0)))
         targets: list[tuple[float, ...]] = []
@@ -450,6 +466,8 @@ class RobotExecutor:
 
 
 def build_adapter(config: StudyConfig, robot_config_path: str | Path) -> tuple[RobotAdapter, GripperAdapter]:
+    """按锁定配置选择 mock 或真机硬件；mock 路径不会读取真机凭据。"""
+
     if config.robot_mode == "mock":
         return MockRobotAdapter(config.workcell.get("joint_poses_rad", {}).get("home", (0,) * 6)), MockGripperAdapter()
     adapter = AuboRobotAdapter(robot_config_path)
