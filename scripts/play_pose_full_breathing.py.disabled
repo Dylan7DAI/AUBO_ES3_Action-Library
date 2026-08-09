@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import AuboSdkClient, AuboSdkError, JOINT_NAMES
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+POSE_FILE = ROOT / "config" / "emotion_poses_new_es3.json"
+BREATHING_SCRIPT = ROOT / "scripts" / "play_anticipation_breathing.py"
+RUNTIME_DIR = ROOT / ".runtime"
+LOG_DIR = ROOT / "logs"
+STOP_FILE = RUNTIME_DIR / "anticipation_breathing.stop"
+PID_FILE = RUNTIME_DIR / "anticipation_breathing.pid"
+READY_FILE = RUNTIME_DIR / "anticipation_breathing.ready"
+LOG_FILE = LOG_DIR / "anticipation_breathing.log"
+SAMPLE_TIME = 0.01
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法载入脚本：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_pose(name: str) -> list[float]:
+    data = json.loads(POSE_FILE.read_text(encoding="utf-8"))
+    joints = data["poses"][name]["joint_positions_rad"]
+    return [float(joints[joint_name]) for joint_name in JOINT_NAMES]
+
+
+def max_difference(a: Sequence[float], b: Sequence[float]) -> float:
+    return max(abs(x - y) for x, y in zip(a, b))
+
+
+def process_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def read_pid() -> int | None:
+    try:
+        return int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def clean_runtime() -> None:
+    for path in (STOP_FILE, PID_FILE, READY_FILE):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def clear_stale_runtime() -> None:
+    pid = read_pid()
+    if pid is not None and process_running(pid):
+        raise RuntimeError(
+            "腕部呼吸已经运行，请先执行：python3 scripts/stop_breathing.py"
+        )
+    clean_runtime()
+
+
+def build_trajectory(
+    center: Sequence[float], amplitude_deg: float, cycle_seconds: float
+) -> list[list[float]]:
+    wrist3_index = JOINT_NAMES.index("wrist3_joint")
+    amplitude_rad = math.radians(amplitude_deg)
+    point_count = max(100, int(round(cycle_seconds / SAMPLE_TIME)) + 1)
+    trajectory: list[list[float]] = []
+
+    for index in range(point_count):
+        progress = index / (point_count - 1)
+        phase = 2.0 * math.pi * progress
+        offset = amplitude_rad * math.sin(phase) ** 3
+        point = list(center)
+        point[wrist3_index] = center[wrist3_index] + offset
+        trajectory.append(point)
+
+    trajectory[0] = list(center)
+    trajectory[-1] = list(center)
+    return trajectory
+
+
+def make_buffer_name(
+    pose_name: str,
+    center: Sequence[float],
+    amplitude_deg: float,
+    cycle_seconds: float,
+) -> str:
+    signature = {
+        "version": 1,
+        "pose": pose_name,
+        "center": [round(float(value), 6) for value in center],
+        "amplitude_deg": round(amplitude_deg, 3),
+        "cycle_seconds": round(cycle_seconds, 3),
+    }
+    encoded = json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
+    return "full_breathe_" + hashlib.sha1(encoded).hexdigest()[:10]
+
+
+def wait_pose(
+    client: AuboSdkClient,
+    target: Sequence[float],
+    timeout: float,
+    tolerance: float = 0.02,
+    stable_samples: int = 3,
+) -> float:
+    deadline = time.monotonic() + timeout
+    stable = 0
+    last_error = float("inf")
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+        last_error = max_difference(current, target)
+        if last_error <= tolerance:
+            stable += 1
+            if stable >= stable_samples:
+                return last_error
+        else:
+            stable = 0
+        time.sleep(0.05)
+
+    raise AuboSdkError(f"等待目标姿态超时，最后误差：{last_error:.4f} rad")
+
+
+def wait_cycle_center(
+    client: AuboSdkClient,
+    center: Sequence[float],
+    cycle_seconds: float,
+) -> float:
+    wrist3_index = JOINT_NAMES.index("wrist3_joint")
+    started = time.monotonic()
+    not_before = started + cycle_seconds * 0.85
+    deadline = started + cycle_seconds + 1.5
+    tolerance = math.radians(2.0)
+    stable = 0
+    last_error = float("inf")
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+        last_error = abs(current[wrist3_index] - center[wrist3_index])
+        if time.monotonic() >= not_before and last_error <= tolerance:
+            stable += 1
+            if stable >= 3:
+                return last_error
+        else:
+            stable = 0
+        time.sleep(0.04)
+
+    raise AuboSdkError(
+        f"完整呼吸轨迹未按时回中，关节6误差：{math.degrees(last_error):.2f}°"
+    )
+
+
+def run_motion(args: argparse.Namespace, worker: bool) -> int:
+    breathing = load_module("stable_breathing", BREATHING_SCRIPT)
+    helper = breathing.load_anticipation_module()
+    target = load_pose(args.pose_name)
+    config = load_config(args.config)
+
+    if worker:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+    try:
+        with AuboSdkClient(config) as client:
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+            trajectory = build_trajectory(
+                target, args.amplitude_deg, args.cycle_seconds
+            )
+            buffer_name = make_buffer_name(
+                args.pose_name, target, args.amplitude_deg, args.cycle_seconds
+            )
+
+            breathing.prepare_breathing_buffer(
+                motion,
+                helper,
+                buffer_name,
+                trajectory,
+                rebuild=args.rebuild_cache,
+            )
+
+            if args.prepare_only:
+                print("完整连续呼吸缓存已准备，机械臂没有运动。")
+                return 0
+
+            client.prepare_for_motion()
+
+            if not args.no_move:
+                current = client.current_joints()
+                distance = max_difference(current, target)
+                print(f"移动到点位：{args.pose_name}")
+                client.move_to_joints(list(target), prepare=False)
+                timeout = max(
+                    8.0,
+                    distance / max(0.05, config.safety.max_velocity_rad_s) * 3.0 + 5.0,
+                )
+                final_error = wait_pose(client, target, timeout)
+                print(f"已到达点位，最大误差：{final_error:.4f} rad")
+            else:
+                error = max_difference(client.current_joints(), target)
+                if error > 0.08:
+                    raise AuboSdkError(
+                        f"机械臂当前不在{args.pose_name}附近，最大误差：{error:.4f} rad"
+                    )
+
+            print(f"到位后稳定{args.settle_seconds:.2f}秒……", flush=True)
+            time.sleep(args.settle_seconds)
+
+            cycle_count = 0
+            ready_written = False
+            while True:
+                result = motion.movePathBuffer(buffer_name)
+                helper.check_result(result, "执行完整腕部呼吸轨迹")
+
+                if worker and not ready_written:
+                    READY_FILE.write_text(
+                        f"pid={os.getpid()}\nmode=full_continuous\n",
+                        encoding="utf-8",
+                    )
+                    ready_written = True
+
+                wait_cycle_center(client, target, args.cycle_seconds)
+                cycle_count += 1
+                print(f"已完成完整呼吸循环：{cycle_count}", flush=True)
+
+                if args.once or (worker and STOP_FILE.exists()):
+                    break
+
+            final_error = wait_pose(
+                client, target, timeout=3.0, tolerance=0.04, stable_samples=2
+            )
+            print(f"呼吸结束并回中，最大误差：{final_error:.4f} rad")
+        return 0
+
+    except (
+        AuboSdkError,
+        OSError,
+        KeyError,
+        ValueError,
+        RuntimeError,
+        json.JSONDecodeError,
+    ) as exc:
+        print(f"动作失败：{exc}", file=sys.stderr, flush=True)
+        print("机械臂仍异常运动时，请按实体Stop按钮。", file=sys.stderr)
+        return 8
+    finally:
+        if worker:
+            clean_runtime()
+
+
+def start_background(args: argparse.Namespace) -> int:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        clear_stale_runtime()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        args.pose_name,
+        "--worker",
+        "--amplitude-deg",
+        str(args.amplitude_deg),
+        "--cycle-seconds",
+        str(args.cycle_seconds),
+        "--settle-seconds",
+        str(args.settle_seconds),
+    ]
+    if args.no_move:
+        command.append("--no-move")
+    if args.rebuild_cache:
+        command.append("--rebuild-cache")
+    if args.config:
+        command.extend(["--config", args.config])
+
+    with LOG_FILE.open("a", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=str(ROOT),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        if READY_FILE.exists():
+            print("腕部呼吸已在后台持续运行")
+            print(f"后台PID：{process.pid}")
+            print("停止：python3 scripts/stop_breathing.py")
+            return 0
+        if process.poll() is not None:
+            print(f"启动失败，请查看日志：{LOG_FILE}", file=sys.stderr)
+            return process.returncode or 8
+        time.sleep(0.10)
+
+    print(f"等待启动超时，请查看日志：{LOG_FILE}", file=sys.stderr)
+    return 8
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="移动到指定姿态后，以完整连续轨迹持续呼吸。"
+    )
+    parser.add_argument("pose_name")
+    parser.add_argument("--amplitude-deg", type=float, default=20.0)
+    parser.add_argument("--cycle-seconds", type=float, default=4.0)
+    parser.add_argument("--settle-seconds", type=float, default=0.60)
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--no-move", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--confirm-motion", default="")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if not 2.0 <= args.amplitude_deg <= 20.0:
+        print("amplitude-deg必须在2到20度之间。", file=sys.stderr)
+        return 1
+    if not 2.5 <= args.cycle_seconds <= 8.0:
+        print("cycle-seconds必须在2.5到8秒之间。", file=sys.stderr)
+        return 1
+    if not 0.0 <= args.settle_seconds <= 3.0:
+        print("settle-seconds必须在0到3秒之间。", file=sys.stderr)
+        return 1
+
+    if args.prepare_only:
+        return run_motion(args, worker=False)
+    if args.worker:
+        return run_motion(args, worker=True)
+    if args.confirm_motion != CONFIRM:
+        print("当前为预览模式，机械臂不会运动。")
+        return 0
+    if args.once:
+        try:
+            clear_stale_runtime()
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return run_motion(args, worker=False)
+    return start_background(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

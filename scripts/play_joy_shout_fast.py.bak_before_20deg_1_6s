@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+import time
+from pathlib import Path
+from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[1]
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import (
+    AuboSdkClient,
+    AuboSdkError,
+    JOINT_NAMES,
+)
+from scripts.breathe_once_curiosity_fast import (
+    build_trajectory as build_breath_trajectory,
+    load_helper as load_breath_helper,
+    make_buffer_name as make_breath_buffer_name,
+)
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+POSE_FILE = ROOT / "config" / "emotion_poses_new_es3.json"
+
+
+def load_pose(
+    data: dict,
+    pose_name: str,
+) -> list[float]:
+    try:
+        joints = data["poses"][pose_name]["joint_positions_rad"]
+    except KeyError as exc:
+        raise KeyError(
+            f"点位 {pose_name} 不完整：{exc}"
+        ) from exc
+
+    return [
+        float(joints[name])
+        for name in JOINT_NAMES
+    ]
+
+
+def max_joint_difference(
+    current: Sequence[float],
+    target: Sequence[float],
+) -> float:
+    return max(
+        abs(a - b)
+        for a, b in zip(current, target)
+    )
+
+
+def wait_pose(
+    client: AuboSdkClient,
+    target: Sequence[float],
+    *,
+    timeout: float,
+    tolerance: float = 0.018,
+    stable_samples: int = 4,
+) -> float:
+    deadline = time.monotonic() + timeout
+    stable_count = 0
+    last_error = float("inf")
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+
+        last_error = max_joint_difference(
+            current,
+            target,
+        )
+
+        if last_error <= tolerance:
+            stable_count += 1
+
+            if stable_count >= stable_samples:
+                return last_error
+        else:
+            stable_count = 0
+
+        time.sleep(0.025)
+
+    raise AuboSdkError(
+        "等待目标点位超时，"
+        f"最后误差：{last_error:.4f} rad"
+    )
+
+
+def move_segment(
+    client: AuboSdkClient,
+    motion: object,
+    target: Sequence[float],
+    *,
+    label: str,
+    velocity: float,
+    acceleration: float,
+    stable_samples: int = 4,
+) -> None:
+    current = client.current_joints()
+
+    distance = max_joint_difference(
+        current,
+        target,
+    )
+
+    if distance <= 0.025:
+        print(
+            f"{label}：当前已在目标点附近，"
+            f"最大误差{distance:.4f} rad，跳过移动。"
+        )
+        return
+
+    timeout = max(
+        5.0,
+        distance / max(velocity, 0.05) * 4.0 + 3.0,
+    )
+
+    print(
+        f"{label}："
+        f"速度={velocity:.2f} rad/s，"
+        f"加速度={acceleration:.2f} rad/s²"
+    )
+
+    started = time.monotonic()
+
+    result = motion.moveJoint(
+        list(target),
+        acceleration,
+        velocity,
+        0,
+        0,
+    )
+
+    if isinstance(result, int) and result != 0:
+        raise AuboSdkError(
+            f"{label}下发失败，返回码：{result}"
+        )
+
+    error = wait_pose(
+        client,
+        target,
+        timeout=timeout,
+        stable_samples=stable_samples,
+    )
+
+    elapsed = time.monotonic() - started
+
+    print(
+        f"{label}完成："
+        f"用时{elapsed:.2f}秒，"
+        f"最大误差{error:.4f} rad"
+    )
+
+
+def execute_breath_once(
+    client: AuboSdkClient,
+    motion: object,
+    helper: object,
+    buffer_name: str,
+    center: Sequence[float],
+    *,
+    amplitude_deg: float,
+    cycle_seconds: float,
+) -> None:
+    """执行中心→负向→正向→中心的一次快速呼吸。"""
+    wrist3_index = JOINT_NAMES.index(
+        "wrist3_joint"
+    )
+
+    center_wrist3 = center[wrist3_index]
+    peak_threshold_deg = amplitude_deg * 0.40
+    started = time.monotonic()
+
+    result = motion.movePathBuffer(
+        buffer_name
+    )
+
+    helper.check_result(
+        result,
+        "执行举高后的双向快速呼吸",
+    )
+
+    negative_seen = False
+    positive_seen = False
+    stable_center = 0
+
+    minimum_offset_deg = 0.0
+    maximum_offset_deg = 0.0
+
+    deadline = (
+        started
+        + cycle_seconds
+        + 2.0
+    )
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+        elapsed = time.monotonic() - started
+
+        offset_deg = math.degrees(
+            current[wrist3_index]
+            - center_wrist3
+        )
+
+        minimum_offset_deg = min(
+            minimum_offset_deg,
+            offset_deg,
+        )
+
+        maximum_offset_deg = max(
+            maximum_offset_deg,
+            offset_deg,
+        )
+
+        if offset_deg <= -peak_threshold_deg:
+            negative_seen = True
+
+        if offset_deg >= peak_threshold_deg:
+            positive_seen = True
+
+        center_error = max_joint_difference(
+            current,
+            center,
+        )
+
+        if (
+            negative_seen
+            and positive_seen
+            and elapsed >= cycle_seconds + 0.15
+            and center_error <= 0.02
+        ):
+            stable_center += 1
+
+            if stable_center >= 3:
+                print(
+                    "双向快速呼吸完成："
+                    f"实际用时{elapsed:.2f}秒，"
+                    f"范围{minimum_offset_deg:.2f}°"
+                    f"至{maximum_offset_deg:.2f}°"
+                )
+                return
+        else:
+            stable_center = 0
+
+        time.sleep(0.02)
+
+    raise AuboSdkError(
+        "双向快速呼吸未完整结束或未回中。"
+        f"检测范围：{minimum_offset_deg:.2f}°"
+        f"至{maximum_offset_deg:.2f}°"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "高兴—兴奋动作："
+            "中间位→举高→快速呼吸→振臂→举高位"
+        )
+    )
+
+    parser.add_argument(
+        "--config",
+        default="config/robot.curiosity_fast.json",
+    )
+
+    parser.add_argument(
+        "--approach-velocity",
+        type=float,
+        default=0.40,
+    )
+
+    parser.add_argument(
+        "--approach-acceleration",
+        type=float,
+        default=0.80,
+    )
+
+    parser.add_argument(
+        "--shout-velocity",
+        type=float,
+        default=0.75,
+    )
+
+    parser.add_argument(
+        "--shout-acceleration",
+        type=float,
+        default=1.50,
+    )
+
+    parser.add_argument(
+        "--return-velocity",
+        type=float,
+        default=0.68,
+    )
+
+    parser.add_argument(
+        "--return-acceleration",
+        type=float,
+        default=1.30,
+    )
+
+    parser.add_argument(
+        "--center-hold",
+        type=float,
+        default=0.20,
+    )
+
+    parser.add_argument(
+        "--lift-hold",
+        type=float,
+        default=0.10,
+    )
+
+    parser.add_argument(
+        "--peak-hold",
+        type=float,
+        default=0.12,
+    )
+
+    parser.add_argument(
+        "--breath-amplitude-deg",
+        type=float,
+        default=15.0,
+        help="举高后双向呼吸左右各自的幅度",
+    )
+
+    parser.add_argument(
+        "--breath-seconds",
+        type=float,
+        default=2.0,
+        help="举高后双向快速呼吸一次的总时长",
+    )
+
+    parser.add_argument(
+        "--confirm-motion",
+        default="",
+    )
+
+    args = parser.parse_args()
+
+    if args.confirm_motion != CONFIRM:
+        print("当前为预览模式，不会运动。")
+        print(
+            "顺序：curiosity_down"
+            " → joy_lift_max"
+            " → 快速呼吸一次"
+            " → joy_shout_peak_max"
+            " → joy_lift_max"
+            " → anticipation_look_down"
+        )
+        return 0
+
+    if not 0.20 <= args.approach_velocity <= 1.00:
+        print(
+            "approach-velocity必须在0.20到1.00之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not 0.35 <= args.shout_velocity <= 3.05:
+        print(
+            "shout-velocity必须在0.35到3.05之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not 0.30 <= args.return_velocity <= 1.30:
+        print(
+            "return-velocity必须在0.30到1.30之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not 0.0 <= args.peak_hold <= 0.50:
+        print(
+            "peak-hold必须在0到0.50秒之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not 3.0 <= args.breath_amplitude_deg <= 16.0:
+        print(
+            "breath-amplitude-deg必须在3°到16°之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not 0.8 <= args.breath_seconds <= 5.0:
+        print(
+            "breath-seconds必须在0.8秒到5.0秒之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        data = json.loads(
+            POSE_FILE.read_text(encoding="utf-8")
+        )
+
+        center = load_pose(
+            data,
+            "curiosity_down",
+        )
+
+        lift = load_pose(
+            data,
+            "joy_lift_max",
+        )
+
+        shout_peak = load_pose(
+            data,
+            "joy_shout_peak_max",
+        )
+
+        look_down = load_pose(
+            data,
+            "anticipation_look_down",
+        )
+
+        config = load_config(args.config)
+        breath_helper = load_breath_helper()
+
+        breath_trajectory = build_breath_trajectory(
+            lift,
+            amplitude_deg=args.breath_amplitude_deg,
+            cycle_seconds=args.breath_seconds,
+        )
+
+        breath_buffer = make_breath_buffer_name(
+            "joy_lift_max",
+            lift,
+            args.breath_amplitude_deg,
+            args.breath_seconds,
+        )
+
+        with AuboSdkClient(config) as client:
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+
+            breath_helper.prepare_buffer(
+                motion,
+                breath_buffer,
+                breath_trajectory,
+                rebuild=False,
+            )
+
+            client.prepare_for_motion()
+
+            print("进入结果反应中间位……")
+
+            move_segment(
+                client,
+                motion,
+                center,
+                label="到达中间位",
+                velocity=args.approach_velocity,
+                acceleration=args.approach_acceleration,
+            )
+
+            time.sleep(args.center_hold)
+
+            print("开始举高……")
+
+            move_segment(
+                client,
+                motion,
+                lift,
+                label="举高",
+                velocity=args.approach_velocity,
+                acceleration=args.approach_acceleration,
+            )
+
+            time.sleep(args.lift_hold)
+
+            print(
+                "举高完成，双向快速呼吸一次："
+                f"左右各{args.breath_amplitude_deg:.1f}°，"
+                f"{args.breath_seconds:.2f}秒……"
+            )
+
+            execute_breath_once(
+                client,
+                motion,
+                breath_helper,
+                breath_buffer,
+                lift,
+                amplitude_deg=args.breath_amplitude_deg,
+                cycle_seconds=args.breath_seconds,
+            )
+
+            print("呼吸完成，立即快速振臂高呼！")
+
+            move_segment(
+                client,
+                motion,
+                shout_peak,
+                label="振臂上扬",
+                velocity=args.shout_velocity,
+                acceleration=args.shout_acceleration,
+                stable_samples=1,
+            )
+
+            if args.peak_hold > 0:
+                print(
+                    f"兴奋峰值停留"
+                    f"{args.peak_hold:.2f}秒……"
+                )
+                time.sleep(args.peak_hold)
+            else:
+                print("到达兴奋峰值，立即回落！")
+
+            print("快速回到举高准备位……")
+
+            move_segment(
+                client,
+                motion,
+                lift,
+                label="回到举高位",
+                velocity=args.return_velocity,
+                acceleration=args.return_acceleration,
+                stable_samples=1,
+            )
+
+            print("连续回到期待低头位……")
+
+            move_segment(
+                client,
+                motion,
+                look_down,
+                label="回到anticipation_look_down",
+                velocity=args.return_velocity,
+                acceleration=args.return_acceleration,
+                stable_samples=1,
+            )
+
+        print(
+            "振臂高呼演示完成，"
+            "当前停在anticipation_look_down。"
+        )
+        return 0
+
+    except (
+        AuboSdkError,
+        KeyError,
+        ValueError,
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
+        print(
+            f"振臂高呼动作失败：{exc}",
+            file=sys.stderr,
+        )
+        print(
+            "机械臂仍在异常运动时，"
+            "请立即按实体Stop按钮。",
+            file=sys.stderr,
+        )
+        return 8
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

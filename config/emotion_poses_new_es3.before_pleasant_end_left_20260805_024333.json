@@ -1,0 +1,350 @@
+{
+  "poses": {
+    "pre_start_rest": {
+      "name": "pre_start_rest",
+      "description": "游戏开始前的蜷缩静止姿态（更新版）",
+      "saved_at": "2026-08-04T03:04:42+08:00",
+      "tcp_pose": [
+        0.16889665495866027,
+        0.08161646253520313,
+        0.13691851227371962,
+        -1.5811678007555532,
+        0.4428514690899157,
+        0.5750530074617458
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.5817419106973123,
+        "upperArm_joint": -0.5752971854353596,
+        "foreArm_joint": 2.0258225409074515,
+        "wrist1_joint": -1.6371692941341307,
+        "wrist2_joint": -3.1307316225706456,
+        "wrist3_joint": -0.6538039895227665
+      }
+    },
+    "anticipation_face_user": {
+      "name": "anticipation_face_user",
+      "description": "",
+      "saved_at": "2026-08-04T07:36:16+08:00",
+      "tcp_pose": [
+        0.14317528599450124,
+        -0.14157550244564698,
+        0.3824391438519261,
+        -1.6295601169578706,
+        -0.07433145362100747,
+        -1.3416939463441302
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.49613380432923343,
+        "upperArm_joint": 0.4526603360283435,
+        "foreArm_joint": 1.7488497437930235,
+        "wrist1_joint": -1.9208252383329514,
+        "wrist2_joint": -2.2879068122175164,
+        "wrist3_joint": -0.12230305885560022
+      }
+    },
+    "anticipation_idle_left": {
+      "name": "anticipation_idle_left",
+      "description": "朝向用户后的轻微左侧摆动点（更新版）",
+      "saved_at": "2026-08-04T04:03:53+08:00",
+      "tcp_pose": [
+        0.13773903120772035,
+        -0.16072772767060525,
+        0.39828970092932026,
+        -1.579727679759649,
+        -0.6531223049801503,
+        -1.5925758582743847
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.49616314855353366,
+        "upperArm_joint": 0.49796048229192696,
+        "foreArm_joint": 1.7252936677359603,
+        "wrist1_joint": -1.920704193407713,
+        "wrist2_joint": -2.037402505421956,
+        "wrist3_joint": -0.6538333337470669
+      }
+    },
+    "anticipation_idle_right": {
+      "name": "anticipation_idle_right",
+      "description": "朝向用户后的轻微右侧摆动点（更新版）",
+      "saved_at": "2026-08-04T04:04:43+08:00",
+      "tcp_pose": [
+        0.14326531688241861,
+        -0.12156867367836037,
+        0.37269991806821107,
+        -1.6581392227722163,
+        -0.5696482253004334,
+        -1.106718730562569
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.4524695985703915,
+        "upperArm_joint": 0.4527740448975071,
+        "foreArm_joint": 1.7838684074673905,
+        "wrist1_joint": -1.920733537632013,
+        "wrist2_joint": -2.434785658924615,
+        "wrist3_joint": -0.6538296657190295
+      }
+    },
+    "anticipation_look_down": {
+      "name": "anticipation_look_down",
+      "description": "",
+      "saved_at": "2026-08-04T07:32:28+08:00",
+      "tcp_pose": [
+        0.1933081219386666,
+        -0.15675679583865684,
+        0.31229073573613125,
+        -1.8800827269836358,
+        0.031496379588306374,
+        -1.2700369535785523
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.45269701630871884,
+        "upperArm_joint": 0.1413034440900425,
+        "foreArm_joint": 1.7512119538491975,
+        "wrist1_joint": -1.945426702380713,
+        "wrist2_joint": -2.2879214843296665,
+        "wrist3_joint": -0.2467372420010095
+      }
+    },
+    "curiosity_down": {
+      "joint_positions_rad": {
+        "shoulder_joint": 0.4557451476079122,
+        "upperArm_joint": -0.49354784456276973,
+        "foreArm_joint": 1.3083305805689278,
+        "wrist1_joint": -2.1276653393696696,
+        "wrist2_joint": -1.3627714527020538,
+        "wrist3_joint": 0.19890248836348792
+      }
+    },
+    "curiosity_left": {
+      "joint_positions_rad": {
+        "shoulder_joint": 0.23839247821561255,
+        "upperArm_joint": -0.5245756937322963,
+        "foreArm_joint": 1.31444885133554,
+        "wrist1_joint": -2.1276469992294818,
+        "wrist2_joint": -1.2592743735949066,
+        "wrist3_joint": 0.19890248836348792
+      }
+    },
+    "curiosity_right": {
+      "name": "curiosity_right",
+      "description": "Curiosity: look toward the right cup",
+      "saved_at": "2026-08-04T19:49:38+08:00",
+      "tcp_pose": [
+        0.40908262674628737,
+        0.1338606578351114,
+        0.19680425057336415,
+        -2.3091938518524455,
+        0.06123260126380094,
+        -1.1731422168536159
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.6232823282224201,
+        "upperArm_joint": -0.6492409626440704,
+        "foreArm_joint": 1.149009782758503,
+        "wrist1_joint": -2.0872069901156354,
+        "wrist2_joint": -1.4430169020792534,
+        "wrist3_joint": 0.19881078766254948
+      }
+    },
+    "result_response_center": {
+      "joint_positions_rad": {
+        "shoulder_joint": 0.4557451476079122,
+        "upperArm_joint": -0.49354784456276973,
+        "foreArm_joint": 1.3083305805689278,
+        "wrist1_joint": -2.1276653393696696,
+        "wrist2_joint": -1.3627714527020538,
+        "wrist3_joint": 0.19890248836348792
+      },
+      "description": "Center pose before result-related emotional response"
+    },
+    "joy_peak_max": {
+      "name": "joy_peak_max",
+      "description": "Maximum safe rising and expanding pose for joy and excitement",
+      "saved_at": "2026-08-04T21:10:00+08:00",
+      "tcp_pose": [
+        0.2559636557861081,
+        0.028219858652259157,
+        0.6994717417134463,
+        -0.0734335764300797,
+        0.22414356918859285,
+        -0.7192606111037283
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.6710180451029282,
+        "upperArm_joint": 0.28328547336702936,
+        "foreArm_joint": 1.0600087504557023,
+        "wrist1_joint": -0.908126713505403,
+        "wrist2_joint": -1.362841145234767,
+        "wrist3_joint": 0.19881812371862456
+      }
+    },
+    "joy_lift_max": {
+      "name": "joy_lift_max",
+      "description": "Maximum safe lifting pose before the full joy peak",
+      "saved_at": "2026-08-04T21:23:04+08:00",
+      "tcp_pose": [
+        0.2977984581564764,
+        0.03993743798178762,
+        0.5425341534888077,
+        -0.3202077401636917,
+        0.15423730499670857,
+        -1.1597665745460122
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.6071686810535196,
+        "upperArm_joint": 0.41425975050336733,
+        "foreArm_joint": 1.753372422363307,
+        "wrist1_joint": -0.5216412713022666,
+        "wrist2_joint": -1.3628374772067293,
+        "wrist3_joint": -0.14217276673493878
+      }
+    },
+    "joy_shout_peak_max": {
+      "name": "joy_shout_peak_max",
+      "description": "Maximum safe rapid arm-raising peak for excited celebration",
+      "saved_at": "2026-08-04T21:25:57+08:00",
+      "tcp_pose": [
+        0.23179503294682785,
+        0.013261447804851225,
+        0.6559569384040157,
+        -0.23829657783990493,
+        0.017328289823473172,
+        -1.1060299273327
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.6137711315210864,
+        "upperArm_joint": 0.4590647129818833,
+        "foreArm_joint": 1.313194385746702,
+        "wrist1_joint": -0.9497294875071488,
+        "wrist2_joint": -1.516850638446838,
+        "wrist3_joint": -0.14217276673493878
+      }
+    },
+    "disappointment_sink_max": {
+      "name": "disappointment_sink_max",
+      "description": "Maximum sinking, retreating and closing pose for disappointment",
+      "saved_at": "2026-08-04T23:08:01+08:00",
+      "tcp_pose": [
+        0.38488620643192595,
+        -0.03477884878731927,
+        0.16275737875950202,
+        -2.4337390804905095,
+        -0.33293997311767953,
+        -2.128195052378182
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.39987374454014674,
+        "upperArm_joint": -0.8106048520714033,
+        "foreArm_joint": 1.2063704052095086,
+        "wrist1_joint": -2.4627176924304606,
+        "wrist2_joint": -0.8287285786048743,
+        "wrist3_joint": 0.7445289950032098
+      }
+    },
+    "disappointment_turn_away": {
+      "name": "disappointment_turn_away",
+      "description": "Look-down and turn-away pose expressing disappointment",
+      "saved_at": "2026-08-04T23:11:45+08:00",
+      "tcp_pose": [
+        0.3730066720515613,
+        0.08367618299677879,
+        0.17050437251444034,
+        -2.4156398126910266,
+        0.6730424707306917,
+        -0.9494236299562013
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.38069729395990265,
+        "upperArm_joint": -0.6669758782055623,
+        "foreArm_joint": 1.2861500150259406,
+        "wrist1_joint": -2.0182297228697497,
+        "wrist2_joint": -2.226060191476603,
+        "wrist3_joint": 0.28835468811490567
+      }
+    },
+    "disappointment_retreat_max": {
+      "name": "disappointment_retreat_max",
+      "description": "Retreating and closing pose expressing frustration after disappointment",
+      "saved_at": "2026-08-04T23:13:19+08:00",
+      "tcp_pose": [
+        0.3091973071376391,
+        -0.01839501390410683,
+        0.20116349473538941,
+        -2.7411735219182622,
+        -0.030022678284266146,
+        -1.295857491906768
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": 0.3517418806315847,
+        "upperArm_joint": -0.40543814307309056,
+        "foreArm_joint": 1.5593080629813303,
+        "wrist1_joint": -2.35000652689302,
+        "wrist2_joint": -1.5119831652410263,
+        "wrist3_joint": 0.06171457173156206
+      }
+    },
+    "pleasant_end_face_user": {
+      "name": "pleasant_end_face_user",
+      "description": "Pleasant ending pose looking up toward the user",
+      "saved_at": "2026-08-05T00:41:40+08:00",
+      "tcp_pose": [
+        0.15872322019784674,
+        -0.1533955202916276,
+        0.3728130700139434,
+        -1.6442575648155169,
+        0.023592545175901862,
+        -1.5055840986836269
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.42738028679363765,
+        "upperArm_joint": 0.4484127595608755,
+        "foreArm_joint": 1.7799582895793757,
+        "wrist1_joint": -1.891818472612108,
+        "wrist2_joint": -2.061439093151937,
+        "wrist3_joint": -0.01286744235568022
+      }
+    },
+    "pleasant_end_right": {
+      "name": "pleasant_end_right",
+      "description": "愉快告别：朝右看（重新拖动示教）",
+      "saved_at": "2026-08-05T02:41:50+08:00",
+      "tcp_pose": [
+        0.1843964923596067,
+        -0.11907994705911161,
+        0.47696550904351304,
+        -1.0739050191501267,
+        -0.3119792085199632,
+        -1.3415784078159176
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.26383392068397005,
+        "upperArm_joint": 0.5645498632853758,
+        "foreArm_joint": 1.6728628749674046,
+        "wrist1_joint": -1.460572084266906,
+        "wrist2_joint": -2.144193473706812,
+        "wrist3_joint": -0.012940802916430962
+      }
+    },
+    "pleasant_end_left": {
+      "name": "pleasant_end_left",
+      "description": "Pleasant ending gaze toward the robot's left side",
+      "saved_at": "2026-08-05T01:03:17+08:00",
+      "tcp_pose": [
+        0.15783784195444991,
+        -0.2031599296807537,
+        0.46467253137800546,
+        -1.065267096591131,
+        0.12385588459448132,
+        -2.1356264299867753
+      ],
+      "joint_positions_rad": {
+        "shoulder_joint": -0.3176182157983768,
+        "upperArm_joint": 0.5962893098941845,
+        "foreArm_joint": 1.7372551071663687,
+        "wrist1_joint": -1.4778558323797808,
+        "wrist2_joint": -1.292301298044891,
+        "wrist3_joint": -0.012933466860355888
+      }
+    }
+  }
+}

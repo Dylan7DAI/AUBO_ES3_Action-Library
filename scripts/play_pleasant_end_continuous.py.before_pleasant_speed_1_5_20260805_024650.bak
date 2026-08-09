@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import ModuleType
+from typing import Sequence, Tuple
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import AuboSdkClient, AuboSdkError, JOINT_NAMES
+
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+PLEASANT_SCRIPT = SCRIPTS / "play_pleasant_end_demo.py"
+BREATHING_SCRIPT = SCRIPTS / "play_anticipation_breathing.py"
+
+
+def load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法载入：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def wait_cycle(
+    client: AuboSdkClient,
+    center: Sequence[float],
+    cycle_seconds: float,
+) -> Tuple[float, float]:
+    wrist3_index = JOINT_NAMES.index("wrist3_joint")
+    center_wrist3 = center[wrist3_index]
+    started_at = time.monotonic()
+    earliest_finish = started_at + cycle_seconds - 0.02
+    deadline = started_at + cycle_seconds + 0.80
+    stable = 0
+    minimum = 0.0
+    maximum = 0.0
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+        offset = math.degrees(current[wrist3_index] - center_wrist3)
+        minimum = min(minimum, offset)
+        maximum = max(maximum, offset)
+
+        if time.monotonic() >= earliest_finish and max(
+            abs(a - b) for a, b in zip(current, center)
+        ) <= 0.025:
+            stable += 1
+            if stable >= 2:
+                return minimum, maximum
+        else:
+            stable = 0
+
+        time.sleep(0.025)
+
+    raise AuboSdkError("等待持续呼吸单轮结束超时")
+
+
+def load_motion_data(args: argparse.Namespace):
+    pleasant = load_module("pleasant_end_demo", PLEASANT_SCRIPT)
+    breathing = load_module("pleasant_breathing", BREATHING_SCRIPT)
+    data = json.loads(pleasant.POSE_FILE.read_text(encoding="utf-8"))
+    look_down = pleasant.load_pose(data, "anticipation_look_down")
+    face_user = pleasant.load_pose(data, "pleasant_end_face_user")
+    right = pleasant.load_pose(data, "pleasant_end_right")
+    left = pleasant.load_pose(data, "pleasant_end_left")
+
+    body_trajectory, durations = pleasant.build_pleasant_trajectory(
+        look_down,
+        face_user,
+        right,
+        left,
+        breath_amplitude_deg=args.breath_amplitude_deg,
+        breath_cycle_seconds=args.breath_cycle_seconds,
+    )
+    body_buffer = pleasant.make_buffer_name(
+        [look_down, face_user, right, left],
+        args.breath_amplitude_deg,
+        args.breath_cycle_seconds,
+    )
+    breath_trajectory = breathing.build_breathing_trajectory(
+        face_user,
+        amplitude_deg=args.breath_amplitude_deg,
+        cycle_seconds=args.breath_cycle_seconds,
+    )
+    breath_buffer = breathing.make_buffer_name(
+        face_user,
+        amplitude_deg=args.breath_amplitude_deg,
+        cycle_seconds=args.breath_cycle_seconds,
+    )
+    helper = pleasant.load_helper()
+
+    return (
+        pleasant,
+        breathing,
+        helper,
+        look_down,
+        face_user,
+        body_trajectory,
+        durations,
+        body_buffer,
+        breath_trajectory,
+        breath_buffer,
+    )
+
+
+def prepare_fast_handoff(client: AuboSdkClient, robot: object) -> None:
+    """呼吸结束后复用机器人当前启动状态，减少固定等待。"""
+    state = robot.getRobotState()
+
+    if not state.isPowerOn():
+        print("检测到机器人未上电，执行常规安全启动……", flush=True)
+        client.prepare_for_motion()
+        return
+
+    manage = robot.getRobotManage()
+    manage.startup()
+    time.sleep(0.20)
+
+    print(
+        "已复用机器人当前启动状态，跳过固定2秒等待。",
+        flush=True,
+    )
+
+
+def run_worker(args: argparse.Namespace) -> int:
+    try:
+        (
+            pleasant,
+            breathing,
+            helper,
+            look_down,
+            face_user,
+            body_trajectory,
+            durations,
+            body_buffer,
+            breath_trajectory,
+            breath_buffer,
+        ) = load_motion_data(args)
+    except (OSError, KeyError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"生成连续愉快告别失败：{exc}", file=sys.stderr, flush=True)
+        return 7
+
+    breathing.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    breathing.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    breathing.PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+    try:
+        config = load_config(args.config)
+
+        with AuboSdkClient(config) as client:
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+
+            # 在机械臂运动前准备好主体和循环呼吸两条缓存。
+            helper.prepare_buffer(
+                motion,
+                body_buffer,
+                body_trajectory,
+                rebuild=args.rebuild_cache,
+            )
+            breathing.prepare_breathing_buffer(
+                motion,
+                helper,
+                breath_buffer,
+                breath_trajectory,
+                rebuild=args.rebuild_cache,
+            )
+
+            prepare_fast_handoff(client, robot)
+            start_error = pleasant.max_difference(
+                client.current_joints(),
+                look_down,
+            )
+            if start_error > 0.025:
+                raise AuboSdkError(
+                    "pleasantend入口取消："
+                    f"当前位置距离anticipation_look_down为{start_error:.4f} rad；"
+                    "pleasantend不会自动回位。"
+                )
+
+            print(
+                "pleasantend入口检查通过："
+                f"最大误差={start_error:.6f} rad。",
+                flush=True,
+            )
+            print("开始连续愉快告别……", flush=True)
+            started_at = time.monotonic()
+            pleasant.check_result(
+                motion.movePathBuffer(body_buffer),
+                "执行连续愉快告别",
+            )
+
+            total_duration = sum(durations)
+            final_error = pleasant.wait_pose(
+                client,
+                face_user,
+                timeout=total_duration + 8.0,
+                earliest_finish=started_at + total_duration - 0.08,
+            )
+            print(
+                "主体动作完成，直接进入持续呼吸；"
+                f"衔接误差={final_error:.6f} rad。",
+                flush=True,
+            )
+
+            cycle_count = 0
+            while not breathing.STOP_FILE.exists():
+                cycle_count += 1
+                print(f"开始持续呼吸循环：{cycle_count}", flush=True)
+                pleasant.check_result(
+                    motion.movePathBuffer(breath_buffer),
+                    "执行持续呼吸",
+                )
+
+                if cycle_count == 1:
+                    breathing.READY_FILE.write_text(
+                        f"pid={os.getpid()}\n"
+                        "center_pose=pleasant_end_face_user\n"
+                        f"amplitude_deg={args.breath_amplitude_deg}\n"
+                        f"cycle_seconds={args.breath_cycle_seconds}\n",
+                        encoding="utf-8",
+                    )
+
+                minimum, maximum = wait_cycle(
+                    client,
+                    face_user,
+                    args.breath_cycle_seconds,
+                )
+                print(
+                    f"已完成持续呼吸循环：{cycle_count}；"
+                    f"wrist3实际范围：{minimum:.2f}° 至 {maximum:.2f}°",
+                    flush=True,
+                )
+
+            final_error = pleasant.max_difference(
+                client.current_joints(),
+                face_user,
+            )
+            print(
+                "已收到停止信号；"
+                "腕部已回到pleasant_end_face_user中心角度，"
+                f"最大误差={final_error:.6f} rad。",
+                flush=True,
+            )
+
+        return 0
+
+    except (OSError, RuntimeError, AuboSdkError) as exc:
+        print(f"连续愉快告别失败：{exc}", file=sys.stderr, flush=True)
+        print(
+            "机械臂仍在异常运动时，请立即按实体Stop按钮。",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 8
+    except KeyboardInterrupt:
+        print("Python流程已中止；机械臂仍在运动时请按实体Stop按钮。")
+        return 130
+    finally:
+        for path in (
+            breathing.READY_FILE,
+            breathing.PID_FILE,
+            breathing.STOP_FILE,
+        ):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def start_background(args: argparse.Namespace) -> int:
+    breathing = load_module("pleasant_breathing_launcher", BREATHING_SCRIPT)
+    breathing.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    breathing.LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        breathing.clear_stale_runtime_files()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--worker",
+        "--config",
+        args.config,
+        "--breath-amplitude-deg",
+        str(args.breath_amplitude_deg),
+        "--breath-cycle-seconds",
+        str(args.breath_cycle_seconds),
+        "--confirm-motion",
+        CONFIRM,
+    ]
+    if args.rebuild_cache:
+        command.append("--rebuild-cache")
+
+    with breathing.LOG_FILE.open("w", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(ROOT),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    print("愉快告别已启动，等待无缝进入持续呼吸……")
+    deadline = time.monotonic() + 90.0
+
+    while time.monotonic() < deadline:
+        if breathing.READY_FILE.exists():
+            print()
+            print("=" * 56)
+            print("愉快告别已无缝进入持续呼吸")
+            print("=" * 56)
+            print(f"后台PID：{process.pid}")
+            print("停止并等待回中：")
+            print("python3 scripts/stop_breathing.py")
+            print(f"日志：{breathing.LOG_FILE}")
+            return 0
+
+        return_code = process.poll()
+        if return_code is not None:
+            print("pleasantend启动失败，最近日志如下：", file=sys.stderr)
+            try:
+                lines = breathing.LOG_FILE.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                ).splitlines()
+                for line in lines[-40:]:
+                    print(line, file=sys.stderr)
+            except OSError:
+                pass
+            return return_code if return_code != 0 else 8
+
+        time.sleep(0.20)
+
+    print(
+        "等待pleasantend进入持续呼吸超时。"
+        f"请查看日志：{breathing.LOG_FILE}",
+        file=sys.stderr,
+    )
+    return 8
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="愉快告别后在同一SDK连接内持续呼吸"
+    )
+    parser.add_argument("--config", default="config/robot.curiosity_fast.json")
+    parser.add_argument("--breath-amplitude-deg", type=float, default=12.0)
+    parser.add_argument("--breath-cycle-seconds", type=float, default=3.6)
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--confirm-motion", default="")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    if not 4.0 <= args.breath_amplitude_deg <= 18.0:
+        print("呼吸幅度必须在4°到18°之间。", file=sys.stderr)
+        return 1
+    if not 3.0 <= args.breath_cycle_seconds <= 6.0:
+        print("呼吸周期必须在3.0秒到6.0秒之间。", file=sys.stderr)
+        return 2
+
+    if args.confirm_motion != CONFIRM:
+        try:
+            load_motion_data(args)
+        except (OSError, KeyError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            print(f"生成连续愉快告别失败：{exc}", file=sys.stderr)
+            return 7
+        print("当前为预览模式，机械臂不会运动。")
+        print("入口：只检查anticipation_look_down，不自动回位。")
+        print("动作：看用户 → 右看 → 回看 → 左看 → 回看 → 持续呼吸")
+        print("主体与持续呼吸共用一个SDK连接，呼吸缓存会在运动前准备。")
+        return 0
+
+    if args.worker:
+        return run_worker(args)
+
+    return start_background(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

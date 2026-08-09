@@ -1,0 +1,68 @@
+{
+  "positive": {
+    "win_1": {
+      "emotion_label": "happy",
+      "amplitude_scale": 0.55,
+      "speed_scale": 0.85,
+      "repeat_count": 1,
+      "peak_hold_seconds": 0.20,
+      "end_hold_seconds": 0.25,
+      "recovery_scale": 1.00
+    },
+    "win_2": {
+      "emotion_label": "joyful",
+      "amplitude_scale": 0.78,
+      "speed_scale": 1.00,
+      "repeat_count": 2,
+      "peak_hold_seconds": 0.18,
+      "end_hold_seconds": 0.30,
+      "recovery_scale": 0.95
+    },
+    "win_3": {
+      "emotion_label": "excited",
+      "amplitude_scale": 1.00,
+      "speed_scale": 1.15,
+      "repeat_count": 3,
+      "peak_hold_seconds": 0.15,
+      "end_hold_seconds": 0.45,
+      "recovery_scale": 0.90
+    }
+  },
+  "negative": {
+    "loss_1": {
+      "emotion_label": "disappointed",
+      "amplitude_scale": 0.55,
+      "speed_scale": 0.90,
+      "repeat_count": 1,
+      "peak_hold_seconds": 0.35,
+      "end_hold_seconds": 0.30,
+      "recovery_scale": 1.00
+    },
+    "loss_2": {
+      "emotion_label": "sad",
+      "amplitude_scale": 0.78,
+      "speed_scale": 0.72,
+      "repeat_count": 1,
+      "peak_hold_seconds": 0.65,
+      "end_hold_seconds": 0.50,
+      "recovery_scale": 1.15
+    },
+    "loss_3": {
+      "emotion_label": "dejected",
+      "amplitude_scale": 1.00,
+      "speed_scale": 0.60,
+      "repeat_count": 1,
+      "peak_hold_seconds": 1.00,
+      "end_hold_seconds": 0.80,
+      "recovery_scale": 1.35
+    }
+  },
+  "llm_bounds": {
+    "amplitude_scale": [0.45, 1.00],
+    "speed_scale": [0.60, 1.15],
+    "repeat_count": [1, 3],
+    "peak_hold_seconds": [0.10, 1.00],
+    "end_hold_seconds": [0.20, 1.20],
+    "recovery_scale": [0.80, 1.40]
+  }
+}

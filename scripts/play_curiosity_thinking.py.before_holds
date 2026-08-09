@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import math
+import sys
+import time
+from pathlib import Path
+from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import AuboSdkClient, AuboSdkError, JOINT_NAMES
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+POSE_FILE = ROOT / "config" / "emotion_poses_new_es3.json"
+HELPER_SCRIPT = ROOT / "scripts" / "play_anticipation_continuous.py"
+
+PATH_BUFFER_CUBIC_SPLINE = 2
+SAMPLE_TIME = 0.01
+FAST_MAX_VELOCITY = 1.10
+FAST_MAX_ACCELERATION = 5.00
+
+
+def load_helper():
+    spec = importlib.util.spec_from_file_location(
+        "curiosity_helper",
+        HELPER_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法载入：{HELPER_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_pose(data: dict, pose_name: str) -> list[float]:
+    try:
+        joints = data["poses"][pose_name]["joint_positions_rad"]
+    except KeyError as exc:
+        raise KeyError(f"点位 {pose_name} 不完整：{exc}") from exc
+    return [float(joints[name]) for name in JOINT_NAMES]
+
+
+def max_joint_difference(a: Sequence[float], b: Sequence[float]) -> float:
+    return max(abs(x - y) for x, y in zip(a, b))
+
+
+def minimum_jerk(progress: float) -> float:
+    return (
+        10.0 * progress**3
+        - 15.0 * progress**4
+        + 6.0 * progress**5
+    )
+
+
+def build_thinking_pulse(
+    center: Sequence[float],
+    *,
+    amplitude_deg: float,
+    pulse_seconds: float,
+) -> list[list[float]]:
+    """中心→左→中心→右→中心；各换向点速度、加速度均为0。"""
+    wrist3_index = JOINT_NAMES.index("wrist3_joint")
+    amplitude_rad = math.radians(amplitude_deg)
+    point_count = max(161, int(round(pulse_seconds / SAMPLE_TIME)) + 1)
+    trajectory: list[list[float]] = []
+
+    for index in range(point_count):
+        progress = index / (point_count - 1)
+
+        if progress <= 0.25:
+            local = progress / 0.25
+            offset = amplitude_rad * minimum_jerk(local)
+
+        elif progress <= 0.50:
+            local = (progress - 0.25) / 0.25
+            offset = amplitude_rad * (1.0 - minimum_jerk(local))
+
+        elif progress <= 0.75:
+            local = (progress - 0.50) / 0.25
+            offset = -amplitude_rad * minimum_jerk(local)
+
+        else:
+            local = (progress - 0.75) / 0.25
+            offset = -amplitude_rad * (1.0 - minimum_jerk(local))
+
+        point = list(center)
+        point[wrist3_index] = center[wrist3_index] + offset
+        trajectory.append(point)
+
+    trajectory[0] = list(center)
+    trajectory[-1] = list(center)
+    return trajectory
+
+
+def make_buffer_name(
+    pose_name: str,
+    center: Sequence[float],
+    amplitude_deg: float,
+    pulse_seconds: float,
+) -> str:
+    signature = {
+        "version": 2,
+        "pose_name": pose_name,
+        "center": [round(float(v), 6) for v in center],
+        "amplitude_deg": round(amplitude_deg, 3),
+        "pulse_seconds": round(pulse_seconds, 3),
+        "max_velocity": FAST_MAX_VELOCITY,
+        "max_acceleration": FAST_MAX_ACCELERATION,
+    }
+    encoded = json.dumps(
+        signature,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha1(encoded).hexdigest()[:10]
+    return f"curiosity_think_v2_{digest}"
+
+
+def prepare_buffer(
+    motion: object,
+    helper: object,
+    buffer_name: str,
+    trajectory: list[list[float]],
+    *,
+    rebuild: bool,
+) -> None:
+    exists = buffer_name in helper.get_buffer_names(motion)
+
+    if exists and not rebuild:
+        try:
+            if motion.pathBufferValid(buffer_name):
+                print(f"复用快速思考缓存：{buffer_name}")
+                return
+        except Exception:
+            pass
+
+    if exists:
+        try:
+            motion.pathBufferFree(buffer_name)
+        except Exception:
+            pass
+
+    print(f"创建快速思考缓存：{buffer_name}")
+    print(f"轨迹点数：{len(trajectory)}")
+
+    result = motion.pathBufferAlloc(
+        buffer_name,
+        PATH_BUFFER_CUBIC_SPLINE,
+        len(trajectory),
+    )
+    helper.check_result(result, "创建快速思考缓存")
+    helper.append_in_chunks(motion, buffer_name, trajectory)
+
+    result = motion.pathBufferEval(
+        buffer_name,
+        [FAST_MAX_ACCELERATION] * len(JOINT_NAMES),
+        [FAST_MAX_VELOCITY] * len(JOINT_NAMES),
+        SAMPLE_TIME,
+    )
+    helper.check_result(result, "计算快速思考轨迹")
+    helper.wait_for_buffer_valid(motion, buffer_name, timeout=60.0)
+
+
+def wait_pose(
+    client: AuboSdkClient,
+    target: Sequence[float],
+    *,
+    timeout: float,
+    tolerance: float = 0.02,
+) -> float:
+    deadline = time.monotonic() + timeout
+    stable = 0
+    last_error = float("inf")
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+        last_error = max_joint_difference(current, target)
+        if last_error <= tolerance:
+            stable += 1
+            if stable >= 3:
+                return last_error
+        else:
+            stable = 0
+        time.sleep(0.03)
+
+    raise AuboSdkError(
+        f"等待目标点位超时，最后误差：{last_error:.4f} rad"
+    )
+
+
+def execute_pulse(
+    client: AuboSdkClient,
+    motion: object,
+    helper: object,
+    buffer_name: str,
+    center: Sequence[float],
+    *,
+    pulse_seconds: float,
+) -> None:
+    wrist3_index = JOINT_NAMES.index("wrist3_joint")
+    center_wrist3 = center[wrist3_index]
+
+    started = time.monotonic()
+
+    result = motion.movePathBuffer(buffer_name)
+    helper.check_result(result, "执行快速思考轨迹")
+
+    seen_positive = False
+    seen_negative = False
+    stable = 0
+
+    max_positive_deg = 0.0
+    min_negative_deg = 0.0
+
+    deadline = (
+        started
+        + max(4.0, pulse_seconds * 3.0)
+    )
+
+    while time.monotonic() < deadline:
+        current = client.current_joints()
+
+        signed_offset_deg = math.degrees(
+            current[wrist3_index]
+            - center_wrist3
+        )
+
+        max_positive_deg = max(
+            max_positive_deg,
+            signed_offset_deg,
+        )
+
+        min_negative_deg = min(
+            min_negative_deg,
+            signed_offset_deg,
+        )
+
+        if signed_offset_deg >= 3.0:
+            seen_positive = True
+
+        if signed_offset_deg <= -3.0:
+            seen_negative = True
+
+        elapsed = (
+            time.monotonic() - started
+        )
+
+        center_error = max_joint_difference(
+            current,
+            center,
+        )
+
+        # 左右两侧都完成，并真正回到中心后，
+        # 才允许进入后续左看动作。
+        if (
+            seen_positive
+            and seen_negative
+            and elapsed
+            >= pulse_seconds * 0.80
+            and center_error <= 0.02
+        ):
+            stable += 1
+
+            if stable >= 3:
+                print(
+                    "快速思考完成："
+                    f"实际用时{elapsed:.2f}秒，"
+                    "实际范围"
+                    f"{min_negative_deg:.2f}°"
+                    " 至 "
+                    f"{max_positive_deg:.2f}°"
+                )
+                return
+        else:
+            stable = 0
+
+        time.sleep(0.02)
+
+    raise AuboSdkError(
+        "快速思考轨迹未完整结束。"
+        f"实际范围："
+        f"{min_negative_deg:.2f}°"
+        " 至 "
+        f"{max_positive_deg:.2f}°"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="中间思考、左看思考、右看并回到中间。"
+    )
+    parser.add_argument("--config", default="config/robot.curiosity_fast.json")
+    parser.add_argument("--amplitude-deg", type=float, default=12.0)
+    parser.add_argument("--pulse-seconds", type=float, default=1.0)
+    parser.add_argument("--first-settle", type=float, default=0.20)
+    parser.add_argument("--transition-pause", type=float, default=0.08)
+    parser.add_argument("--left-settle", type=float, default=0.20)
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--confirm-motion", default="")
+    args = parser.parse_args()
+
+    if args.confirm_motion != CONFIRM:
+        print("当前为预览模式，不会运动。")
+        return 0
+
+    if not 6.0 <= args.amplitude_deg <= 20.0:
+        print("快速思考幅度必须在6°到20°之间。", file=sys.stderr)
+        return 2
+
+    if not 1.4 <= args.pulse_seconds <= 2.5:
+        print("快速思考时长必须在1.4到2.5秒之间。", file=sys.stderr)
+        return 2
+
+    try:
+        helper = load_helper()
+        data = json.loads(POSE_FILE.read_text(encoding="utf-8"))
+        down = load_pose(data, "curiosity_down")
+        left = load_pose(data, "curiosity_left")
+        right = load_pose(data, "curiosity_right")
+        wrist3_index = JOINT_NAMES.index("wrist3_joint")
+
+        wrist_center_difference = abs(
+            math.degrees(left[wrist3_index] - down[wrist3_index])
+        )
+        if wrist_center_difference > 2.0:
+            raise AuboSdkError(
+                "curiosity_down与curiosity_left的关节6中心不一致："
+                f"相差{wrist_center_difference:.2f}°。"
+            )
+
+        config = load_config(args.config)
+
+        down_trajectory = build_thinking_pulse(
+            down,
+            amplitude_deg=args.amplitude_deg,
+            pulse_seconds=args.pulse_seconds,
+        )
+        left_trajectory = build_thinking_pulse(
+            left,
+            amplitude_deg=args.amplitude_deg,
+            pulse_seconds=args.pulse_seconds,
+        )
+
+        down_buffer = make_buffer_name(
+            "curiosity_down",
+            down,
+            args.amplitude_deg,
+            args.pulse_seconds,
+        )
+        left_buffer = make_buffer_name(
+            "curiosity_left",
+            left,
+            args.amplitude_deg,
+            args.pulse_seconds,
+        )
+
+        with AuboSdkClient(config) as client:
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+
+            prepare_buffer(
+                motion,
+                helper,
+                down_buffer,
+                down_trajectory,
+                rebuild=args.rebuild_cache,
+            )
+            prepare_buffer(
+                motion,
+                helper,
+                left_buffer,
+                left_trajectory,
+                rebuild=args.rebuild_cache,
+            )
+
+            client.prepare_for_motion()
+
+            current = client.current_joints()
+            distance = max_joint_difference(current, down)
+            print("下探观察中间杯……")
+            client.move_to_joints(list(down), prepare=False)
+            timeout = max(
+                8.0,
+                distance
+                / max(0.05, config.safety.max_velocity_rad_s)
+                * 3.0
+                + 4.0,
+            )
+            wait_pose(client, down, timeout=timeout)
+            time.sleep(args.first_settle)
+
+            print("中间杯：快速思考一次……")
+            execute_pulse(
+                client,
+                motion,
+                helper,
+                down_buffer,
+                down,
+                pulse_seconds=args.pulse_seconds,
+            )
+
+            time.sleep(args.transition_pause)
+
+            print("立即转向左边杯子……")
+            client.move_to_joints(list(left), prepare=False)
+            wait_pose(client, left, timeout=8.0)
+            time.sleep(args.left_settle)
+
+            print("左边杯：快速思考一次……")
+            execute_pulse(
+                client,
+                motion,
+                helper,
+                left_buffer,
+                left,
+                pulse_seconds=args.pulse_seconds,
+            )
+
+            print("立即转向右边杯子……")
+            current = client.current_joints()
+            distance = max_joint_difference(current, right)
+
+            client.move_to_joints(
+                list(right),
+                prepare=False,
+            )
+
+            timeout = max(
+                8.0,
+                distance
+                / max(
+                    0.05,
+                    config.safety.max_velocity_rad_s,
+                )
+                * 3.0
+                + 4.0,
+            )
+
+            wait_pose(
+                client,
+                right,
+                timeout=timeout,
+            )
+
+            print("回到中间下探位置……")
+            current = client.current_joints()
+            distance = max_joint_difference(current, down)
+
+            client.move_to_joints(
+                list(down),
+                prepare=False,
+            )
+
+            timeout = max(
+                8.0,
+                distance
+                / max(
+                    0.05,
+                    config.safety.max_velocity_rad_s,
+                )
+                * 3.0
+                + 4.0,
+            )
+
+            wait_pose(
+                client,
+                down,
+                timeout=timeout,
+            )
+
+        print("curiosity主体动作完成，已回到中间下探位置。")
+        return 0
+
+    except (
+        AuboSdkError,
+        KeyError,
+        ValueError,
+        OSError,
+        RuntimeError,
+        json.JSONDecodeError,
+    ) as exc:
+        print(f"curiosity动作失败：{exc}", file=sys.stderr)
+        print(
+            "机械臂仍在异常运动时，请按实体Stop按钮。",
+            file=sys.stderr,
+        )
+        return 8
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

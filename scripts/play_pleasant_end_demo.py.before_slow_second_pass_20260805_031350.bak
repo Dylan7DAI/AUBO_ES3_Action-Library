@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import math
+import sys
+import time
+from pathlib import Path
+from typing import List, Sequence
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import (
+    AuboSdkClient,
+    AuboSdkError,
+    JOINT_NAMES,
+)
+
+
+POSE_FILE = ROOT / "config" / "emotion_poses_new_es3.json"
+HELPER_SCRIPT = ROOT / "scripts" / "play_anticipation_continuous.py"
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+PATH_SAMPLE_TIME = 0.01
+PLEASANT_SPEED_SCALE = 2.25
+def load_helper():
+    spec = importlib.util.spec_from_file_location(
+        "pleasant_end_path_helper",
+        HELPER_SCRIPT,
+    )
+
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法载入：{HELPER_SCRIPT}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_pose(data: dict, name: str) -> List[float]:
+    joints = data["poses"][name]["joint_positions_rad"]
+    return [float(joints[joint]) for joint in JOINT_NAMES]
+
+
+def max_difference(a: Sequence[float], b: Sequence[float]) -> float:
+    return max(abs(x - y) for x, y in zip(a, b))
+
+
+def check_result(result: object, label: str) -> None:
+    if result is False:
+        raise AuboSdkError(f"{label}失败，接口返回False")
+
+    if (
+        isinstance(result, int)
+        and not isinstance(result, bool)
+        and result != 0
+    ):
+        raise AuboSdkError(f"{label}失败，返回码：{result}")
+
+
+def build_pleasant_trajectory(
+    look_down: List[float],
+    face_user: List[float],
+    right: List[float],
+    left: List[float],
+    *,
+    breath_amplitude_deg: float,
+    breath_cycle_seconds: float,
+) -> tuple[List[List[float]], List[float]]:
+    """构建：看用户→右看→回看→左看→回看→右看→回看→左看→回看→呼吸。"""
+    anchors = [
+        look_down,
+        face_user,
+        right,
+        face_user,
+        left,
+        face_user,
+        right,
+        face_user,
+        left,
+        face_user,
+    ]
+
+    # 五段略有快慢变化，形成温和的告别韵律。
+    # 第一遍完成后立即重复：右看→回位→左看→回位。
+    base_durations = [
+        1.75,
+        1.65, 1.45, 2.25, 1.90,
+        1.65, 1.45, 2.25, 1.90,
+    ]
+    durations = [
+        duration / PLEASANT_SPEED_SCALE
+        for duration in base_durations
+    ]
+    anchor_times = [0.0]
+
+    for duration in durations:
+        anchor_times.append(anchor_times[-1] + duration)
+
+    tangents: List[List[float]] = []
+
+    for index in range(len(anchors)):
+        if index == 0 or index == len(anchors) - 1:
+            tangents.append([0.0] * len(JOINT_NAMES))
+            continue
+
+        span = anchor_times[index + 1] - anchor_times[index - 1]
+        tangent = [
+            0.78 * (anchors[index + 1][joint] - anchors[index - 1][joint]) / span
+            for joint in range(len(JOINT_NAMES))
+        ]
+        tangents.append(tangent)
+
+    trajectory: List[List[float]] = []
+
+    for segment in range(len(anchors) - 1):
+        start = anchors[segment]
+        end = anchors[segment + 1]
+        duration = durations[segment]
+        steps = max(3, int(round(duration / PATH_SAMPLE_TIME)))
+
+        for step in range(steps):
+            u = step / steps
+            u2 = u * u
+            u3 = u2 * u
+            h00 = 2.0 * u3 - 3.0 * u2 + 1.0
+            h10 = u3 - 2.0 * u2 + u
+            h01 = -2.0 * u3 + 3.0 * u2
+            h11 = u3 - u2
+
+            trajectory.append([
+                h00 * start[joint]
+                + h10 * duration * tangents[segment][joint]
+                + h01 * end[joint]
+                + h11 * duration * tangents[segment + 1][joint]
+                for joint in range(len(JOINT_NAMES))
+            ])
+
+    trajectory.append(list(face_user))
+
+    # 呼吸直接接在最后一次回看用户之后，只旋转wrist3。
+    wrist3 = JOINT_NAMES.index("wrist3_joint")
+    amplitude = math.radians(breath_amplitude_deg)
+    breath_steps = max(
+        100,
+        int(round(breath_cycle_seconds / PATH_SAMPLE_TIME)),
+    )
+
+    for step in range(1, breath_steps + 1):
+        progress = step / breath_steps
+        phase = 2.0 * math.pi * progress
+        offset = amplitude * math.sin(phase) ** 3
+        point = list(face_user)
+        point[wrist3] = face_user[wrist3] + offset
+        trajectory.append(point)
+
+    trajectory[-1] = list(face_user)
+    return trajectory, durations + [breath_cycle_seconds]
+
+
+def make_buffer_name(
+    poses: Sequence[Sequence[float]],
+    breath_amplitude_deg: float,
+    breath_cycle_seconds: float,
+) -> str:
+    signature = {
+        "version": 4,
+        "speed_scale": PLEASANT_SPEED_SCALE,
+        "poses": [
+            [round(float(value), 6) for value in pose]
+            for pose in poses
+        ],
+        "breath_amplitude_deg": round(breath_amplitude_deg, 3),
+        "breath_cycle_seconds": round(breath_cycle_seconds, 3),
+    }
+    digest = hashlib.sha1(
+        json.dumps(signature, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:10]
+    return f"pleasant_end_continuous_v4_{digest}"
+
+
+def wait_pose(
+    client: AuboSdkClient,
+    target: Sequence[float],
+    *,
+    timeout: float,
+    earliest_finish: float = 0.0,
+) -> float:
+    deadline = time.monotonic() + timeout
+    stable = 0
+    last_error = float("inf")
+
+    while time.monotonic() < deadline:
+        last_error = max_difference(client.current_joints(), target)
+
+        if time.monotonic() >= earliest_finish and last_error <= 0.025:
+            stable += 1
+            if stable >= 4:
+                return last_error
+        else:
+            stable = 0
+
+        time.sleep(0.025)
+
+    raise AuboSdkError(
+        f"等待愉快告别动作结束超时，最后误差：{last_error:.4f} rad"
+    )
+
+
+def move_to_start(client: AuboSdkClient, motion: object, target: List[float]) -> None:
+    distance = max_difference(client.current_joints(), target)
+
+    if distance <= 0.025:
+        print(
+            "pleasantend入口检查通过："
+            f"已在anticipation_look_down附近，最大误差={distance:.6f} rad。"
+        )
+        return
+
+    raise AuboSdkError(
+        "pleasantend入口取消："
+        f"当前位置距离anticipation_look_down为{distance:.4f} rad。"
+        "请先由joyshout或disappointment回到lookdown；"
+        "pleasantend不会自动回位。"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="连续愉快告别：看用户、右看、回看、左看、回看、呼吸"
+    )
+    parser.add_argument("--config", default="config/robot.curiosity_fast.json")
+    parser.add_argument("--breath-amplitude-deg", type=float, default=20.0)
+    parser.add_argument("--breath-cycle-seconds", type=float, default=4.8)
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--confirm-motion", default="")
+    args = parser.parse_args()
+
+    if not 4.0 <= args.breath_amplitude_deg <= 20.0:
+        print("呼吸幅度必须在4°到20°之间。", file=sys.stderr)
+        return 1
+
+    if not 2.0 <= args.breath_cycle_seconds <= 6.0:
+        print("呼吸周期必须在2.0秒到6.0秒之间。", file=sys.stderr)
+        return 2
+
+    try:
+        data = json.loads(POSE_FILE.read_text(encoding="utf-8"))
+        look_down = load_pose(data, "anticipation_look_down")
+        face_user = load_pose(data, "pleasant_end_face_user")
+        right = load_pose(data, "pleasant_end_right")
+        left = load_pose(data, "pleasant_end_left")
+        trajectory, durations = build_pleasant_trajectory(
+            look_down,
+            face_user,
+            right,
+            left,
+            breath_amplitude_deg=args.breath_amplitude_deg,
+            breath_cycle_seconds=args.breath_cycle_seconds,
+        )
+        helper = load_helper()
+        buffer_name = make_buffer_name(
+            [look_down, face_user, right, left],
+            args.breath_amplitude_deg,
+            args.breath_cycle_seconds,
+        )
+    except (OSError, KeyError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"读取或生成愉快告别轨迹失败：{exc}", file=sys.stderr)
+        return 7
+
+    if args.confirm_motion != CONFIRM:
+        print("当前为预览模式，机械臂不会运动。")
+        print("动作：低头位 → 看用户 → 右看 → 回位 → 左看 → 回位 → 右看 → 回位 → 左看 → 回位 → 呼吸")
+        print("左右观察之间无sleep、无硬停顿。")
+        print(f"左右观察与回看：{sum(durations[:-1]):.2f}秒")
+        print(f"呼吸：{durations[-1]:.2f}秒，单侧{args.breath_amplitude_deg:.1f}°")
+        print(f"总时长：{sum(durations):.2f}秒")
+        print(f"轨迹点数：{len(trajectory)}")
+        print(f"缓存名称：{buffer_name}")
+        return 0
+
+    config = load_config(args.config)
+
+    try:
+        with AuboSdkClient(config) as client:
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+
+            helper.prepare_buffer(
+                motion,
+                buffer_name,
+                trajectory,
+                rebuild=args.rebuild_cache,
+            )
+
+            client.prepare_for_motion()
+            move_to_start(client, motion, look_down)
+
+            print("开始连续愉快告别……")
+            started_at = time.monotonic()
+            result = motion.movePathBuffer(buffer_name)
+            check_result(result, "执行连续愉快告别")
+
+            total_duration = sum(durations)
+            final_error = wait_pose(
+                client,
+                face_user,
+                timeout=total_duration + 8.0,
+                earliest_finish=started_at + total_duration - 0.25,
+            )
+
+            print("愉快告别完成，当前停在pleasant_end_face_user。")
+            print(f"最终误差：{final_error:.6f} rad")
+
+        return 0
+
+    except AuboSdkError as exc:
+        print(f"愉快告别动作失败：{exc}", file=sys.stderr)
+        print("机械臂仍在异常运动时，请立即按实体Stop按钮。", file=sys.stderr)
+        return 8
+    except KeyboardInterrupt:
+        print("Python流程已中止；机械臂仍在运动时请按实体Stop按钮。")
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

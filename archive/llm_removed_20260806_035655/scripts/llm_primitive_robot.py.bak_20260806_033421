@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Sequence
+
+ROOT = Path(__file__).resolve().parents[1]
+if not (ROOT / "scripts").is_dir():
+    ROOT = Path.cwd()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import AuboSdkClient, AuboSdkError, JOINT_NAMES
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+POSE_FILE = ROOT / "config" / "emotion_poses_new_es3.json"
+
+
+def load_script(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法载入{path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_pose(data: dict[str, Any], name: str) -> list[float]:
+    try:
+        values = data["poses"][name]["joint_positions_rad"]
+        return [float(values[joint]) for joint in JOINT_NAMES]
+    except KeyError as exc:
+        raise KeyError(f"点位{name}不完整：{exc}") from exc
+
+
+def max_difference(a: Sequence[float], b: Sequence[float]) -> float:
+    return max(abs(x - y) for x, y in zip(a, b))
+
+
+def scaled_pose(origin: Sequence[float], target: Sequence[float], scale: float) -> list[float]:
+    return [start + (end - start) * scale for start, end in zip(origin, target)]
+
+
+def wait_pose(
+    client: AuboSdkClient,
+    target: Sequence[float],
+    *,
+    timeout: float,
+    earliest_finish: float = 0.0,
+    tolerance: float = 0.018,
+    stable_samples: int = 3,
+) -> float:
+    deadline = time.monotonic() + timeout
+    stable = 0
+    last_error = float("inf")
+    while time.monotonic() < deadline:
+        last_error = max_difference(client.current_joints(), target)
+        if time.monotonic() >= earliest_finish and last_error <= tolerance:
+            stable += 1
+            if stable >= stable_samples:
+                return last_error
+        else:
+            stable = 0
+        time.sleep(0.025)
+    raise AuboSdkError(f"等待目标点位超时，最后误差：{last_error:.4f} rad")
+
+
+def move_joint(
+    client: AuboSdkClient,
+    motion: object,
+    target: Sequence[float],
+    *,
+    label: str,
+    velocity: float,
+    acceleration: float,
+    stable_samples: int = 3,
+) -> None:
+    distance = max_difference(client.current_joints(), target)
+    if distance <= 0.025:
+        print(f"{label}：已在目标点附近，跳过移动。")
+        return
+    velocity = min(max(velocity, 0.05), 1.30)
+    acceleration = min(max(acceleration, 0.08), 2.00)
+    timeout = max(5.0, distance / velocity * 4.0 + 3.0)
+    print(f"{label}：速度={velocity:.2f} rad/s，加速度={acceleration:.2f} rad/s²")
+    result = motion.moveJoint(list(target), acceleration, velocity, 0, 0)
+    if result is False:
+        raise AuboSdkError(f"{label}下发失败，接口返回False")
+    if isinstance(result, int) and not isinstance(result, bool) and result != 0:
+        raise AuboSdkError(f"{label}下发失败，返回码：{result}")
+    error = wait_pose(client, target, timeout=timeout, stable_samples=stable_samples)
+    print(f"{label}完成，最大误差{error:.4f} rad。")
+
+
+class PrimitiveExecutor:
+    def __init__(
+        self,
+        client: AuboSdkClient,
+        motion: object,
+        poses: dict[str, list[float]],
+        breathing: ModuleType,
+        breathing_helper: ModuleType,
+    ) -> None:
+        self.client = client
+        self.motion = motion
+        self.poses = poses
+        self.breathing = breathing
+        self.breathing_helper = breathing_helper
+
+    def go_start(self, pose: Sequence[float], label: str) -> None:
+        move_joint(
+            self.client,
+            self.motion,
+            pose,
+            label=label,
+            velocity=0.30,
+            acceleration=0.45,
+        )
+
+    def execute(self, name: str, amplitude: float, speed: float, global_tempo: float) -> None:
+        requested_amplitude = amplitude
+        amplitude = min(max(amplitude, 0.0), 1.0)
+        if amplitude != requested_amplitude:
+            print(
+                f"安全限幅：amplitude_scale从{requested_amplitude:.2f}"
+                f"限制为{amplitude:.2f}，不越过已示教的max点位。"
+            )
+        effective_speed = speed * global_tempo
+        if name == "rise":
+            self.rise(amplitude, effective_speed)
+        elif name == "arm_pulse":
+            self.arm_pulse(amplitude, effective_speed)
+        elif name == "turn_away":
+            self.turn_away(amplitude, effective_speed)
+        elif name == "contract":
+            self.contract(amplitude, effective_speed)
+        elif name == "breathe":
+            self.breathe(amplitude, effective_speed)
+        else:
+            raise ValueError(f"未知动作原语：{name}")
+
+    def rise(self, amplitude: float, speed: float) -> None:
+        start = self.poses["curiosity_down"]
+        target = scaled_pose(start, self.poses["joy_lift_max"], amplitude)
+        self.go_start(start, "rise衔接到curiosity_down")
+        move_joint(
+            self.client,
+            self.motion,
+            target,
+            label="rise举高",
+            velocity=0.40 * speed,
+            acceleration=0.80 * speed,
+        )
+        time.sleep(0.10 / max(speed, 0.1))
+
+    def arm_pulse(self, amplitude: float, speed: float) -> None:
+        center = self.poses["joy_lift_max"]
+        peak = scaled_pose(center, self.poses["joy_shout_peak_max"], amplitude)
+        self.go_start(center, "arm_pulse衔接到joy_lift_max")
+        move_joint(
+            self.client,
+            self.motion,
+            peak,
+            label="arm_pulse振臂上扬",
+            velocity=0.75 * speed,
+            acceleration=1.50 * speed,
+            stable_samples=1,
+        )
+        time.sleep(0.12 / max(speed, 0.1))
+        move_joint(
+            self.client,
+            self.motion,
+            center,
+            label="arm_pulse回到joy_lift_max",
+            velocity=0.68 * speed,
+            acceleration=1.30 * speed,
+            stable_samples=1,
+        )
+
+    def turn_away(self, amplitude: float, speed: float) -> None:
+        start = self.poses["curiosity_down"]
+        target = scaled_pose(start, self.poses["disappointment_turn_away"], amplitude)
+        self.go_start(start, "turn_away衔接到curiosity_down")
+        move_joint(
+            self.client,
+            self.motion,
+            target,
+            label="turn_away低头转脸",
+            velocity=0.28 * speed,
+            acceleration=0.38 * speed,
+        )
+        time.sleep(0.45 / max(speed, 0.1))
+
+    def contract(self, amplitude: float, speed: float) -> None:
+        start = self.poses["disappointment_turn_away"]
+        target = scaled_pose(start, self.poses["disappointment_retreat_max"], amplitude)
+        self.go_start(start, "contract衔接到disappointment_turn_away")
+        move_joint(
+            self.client,
+            self.motion,
+            target,
+            label="contract回撤受挫",
+            velocity=0.24 * speed,
+            acceleration=0.32 * speed,
+        )
+        time.sleep(0.60 / max(speed, 0.1))
+
+    def breathe(self, amplitude: float, speed: float) -> None:
+        center = self.poses["disappointment_retreat_max"]
+        self.go_start(center, "breathe衔接到disappointment_retreat_max")
+        amplitude_deg = 10.0 * amplitude
+        cycle_seconds = 4.0 / max(speed, 0.1)
+        trajectory = self.breathing.build_breathing_trajectory(
+            center,
+            amplitude_deg=amplitude_deg,
+            cycle_seconds=cycle_seconds,
+        )
+        buffer_name = self.breathing.make_buffer_name(
+            center,
+            amplitude_deg=amplitude_deg,
+            cycle_seconds=cycle_seconds,
+        )
+        self.breathing.prepare_breathing_buffer(
+            self.motion,
+            self.breathing_helper,
+            buffer_name,
+            trajectory,
+            rebuild=False,
+        )
+        print(f"breathe呼吸：幅度={amplitude_deg:.2f}°，周期={cycle_seconds:.2f}秒")
+        started = time.monotonic()
+        result = self.motion.movePathBuffer(buffer_name)
+        if result is False:
+            raise AuboSdkError("breathe执行失败，接口返回False")
+        if isinstance(result, int) and not isinstance(result, bool) and result != 0:
+            raise AuboSdkError(f"breathe执行失败，返回码：{result}")
+        wait_pose(
+            self.client,
+            center,
+            timeout=cycle_seconds + 3.0,
+            earliest_finish=started + cycle_seconds - 0.20,
+        )
+        print("breathe呼吸完成。")
+
+
+def build_parser(preview: ModuleType) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="DeepSeek五原语编排并控制AUBO机械臂")
+    parser.add_argument("--config", default="config/robot.curiosity_fast.json")
+    parser.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    parser.add_argument("--prompt-file", default=str(preview.DEFAULT_PROMPT))
+    parser.add_argument("--max-rounds", type=int, default=0)
+    parser.add_argument("--confirm-motion", default="")
+    return parser
+
+
+def main() -> int:
+    preview = load_script("llm_primitive_preview_inline", ROOT / "scripts" / "llm_primitive_preview.py")
+    disappointment = load_script(
+        "play_disappointment_demo_inline", ROOT / "scripts" / "play_disappointment_demo.py"
+    )
+    args = build_parser(preview).parse_args()
+    if args.max_rounds < 0:
+        print("max-rounds不能小于0。", file=sys.stderr)
+        return 2
+    if args.confirm_motion != CONFIRM:
+        print("当前为预览模式，不会连接或移动机械臂。")
+        print("正式运行需添加：")
+        print(f"--confirm-motion {CONFIRM}")
+        return 0
+    try:
+        system_prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+        pose_data = json.loads(POSE_FILE.read_text(encoding="utf-8"))
+        poses = {
+            name: load_pose(pose_data, name)
+            for name in (
+                "curiosity_down",
+                "joy_lift_max",
+                "joy_shout_peak_max",
+                "disappointment_turn_away",
+                "disappointment_retreat_max",
+                "anticipation_look_down",
+            )
+        }
+        breathing = disappointment.load_breathing_module()
+        breathing_helper = breathing.load_anticipation_module()
+        config = load_config(args.config)
+    except (OSError, KeyError, json.JSONDecodeError, RuntimeError) as exc:
+        print(f"初始化失败：{exc}", file=sys.stderr)
+        return 2
+
+    print("模式：LLM五原语编排 + AUBO实际执行")
+    print(f"模型：{args.model}")
+    print("每轮输入：1=猜对，0=猜错，e=结束")
+    print("每轮动作下发前还会要求输入MOVE。")
+    history: list[str] = []
+    previous_emotion_state: dict[str, Any] = dict(preview.NEUTRAL_EMOTION_STATE)
+    previous_plan: dict[str, Any] | None = None
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_path = ROOT / "logs" / f"llm_primitive_robot_{timestamp}.jsonl"
+
+    try:
+        with AuboSdkClient(config) as client:
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+            client.prepare_for_motion()
+            executor = PrimitiveExecutor(client, motion, poses, breathing, breathing_helper)
+
+            while True:
+                if args.max_rounds and len(history) >= args.max_rounds:
+                    print(f"已达到{args.max_rounds}轮。")
+                    break
+                text = input(f"\n第{len(history) + 1}轮结果 [1/0/e]：").strip()
+                if text.lower() == "e":
+                    break
+                current_result = preview.normalize_result(text)
+                if current_result is None:
+                    print("输入无效，请输入1、0或e。")
+                    continue
+                candidate_history = history + [current_result]
+                round_input = {
+                    "current_result": current_result,
+                    "result_history": candidate_history,
+                    "previous_emotion_state": previous_emotion_state,
+                    "previous_plan": previous_plan,
+                }
+                print("正在调用LLM生成动作编排……", flush=True)
+                try:
+                    plan = preview.call_openai(args.model, system_prompt, round_input)
+                    preview.validate_plan_for_result(plan, current_result, candidate_history)
+                except Exception as exc:
+                    print(f"本轮生成或校验失败：{exc}", file=sys.stderr)
+                    print("本轮不会写入历史，可以重新输入。")
+                    continue
+
+                print("\n待执行编排：")
+                print(preview.format_plan_json(plan))
+                confirmation = input("确认环境安全后输入MOVE执行；其他输入取消：").strip()
+                if confirmation != "MOVE":
+                    print("已取消，本轮不会执行，也不会写入历史。")
+                    continue
+
+                plan_dict = plan.model_dump(mode="json")
+                started_at = datetime.now(timezone.utc).isoformat()
+                try:
+                    for step_index, step in enumerate(plan.steps, start=1):
+                        for repeat_index in range(1, step.repeat + 1):
+                            print(
+                                f"\n步骤{step_index}/{len(plan.steps)}：{step.primitive} "
+                                f"重复{repeat_index}/{step.repeat}"
+                            )
+                            executor.execute(
+                                step.primitive,
+                                step.amplitude_scale,
+                                step.speed_scale,
+                                plan.global_tempo,
+                            )
+                except Exception:
+                    preview.append_log(
+                        log_path,
+                        {
+                            "timestamp_utc": started_at,
+                            "input": round_input,
+                            "choreography": plan_dict,
+                            "robot_motion": True,
+                            "completed": False,
+                        },
+                    )
+                    raise
+
+                preview.append_log(
+                    log_path,
+                    {
+                        "timestamp_utc": started_at,
+                        "input": round_input,
+                        "choreography": plan_dict,
+                        "robot_motion": True,
+                        "completed": True,
+                    },
+                )
+                history = candidate_history
+                previous_emotion_state = dict(plan_dict["emotion_state"])
+                previous_plan = plan_dict
+                print("本轮动作执行完成。")
+
+        print(f"\n结束，共完成{len(history)}轮。")
+        if history:
+            print(f"记录文件：{log_path}")
+        return 0
+    except (AuboSdkError, OSError, ValueError, KeyError, KeyboardInterrupt) as exc:
+        print(f"机械臂动作已停止：{exc}", file=sys.stderr)
+        print("机械臂仍在异常运动时，请立即按实体Stop按钮。", file=sys.stderr)
+        return 8
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

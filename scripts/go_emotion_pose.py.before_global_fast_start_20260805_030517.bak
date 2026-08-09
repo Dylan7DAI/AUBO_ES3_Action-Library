@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import (
+    AuboSdkClient,
+    AuboSdkError,
+    JOINT_NAMES,
+)
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="移动到已保存的情感动作点位"
+    )
+    parser.add_argument(
+        "name",
+        help="点位名称，例如 pre_start_rest",
+    )
+    parser.add_argument(
+        "--file",
+        default="config/emotion_poses_new_es3.json",
+        help="点位JSON文件",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="机器人配置文件",
+    )
+    parser.add_argument(
+        "--confirm-motion",
+        default="",
+        help=f"真实运动确认文本：{CONFIRM}",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="等待到位最长时间",
+    )
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.01,
+        help="关节到位允许误差，单位rad",
+    )
+    args = parser.parse_args()
+
+    pose_file = ROOT / args.file
+    if not pose_file.exists():
+        print(f"找不到点位文件：{pose_file}", file=sys.stderr)
+        return 1
+
+    try:
+        data = json.loads(pose_file.read_text(encoding="utf-8"))
+        pose = data["poses"][args.name]
+        joints_dict = pose["joint_positions_rad"]
+        target = [float(joints_dict[name]) for name in JOINT_NAMES]
+    except KeyError as exc:
+        print(f"点位数据缺少字段：{exc}", file=sys.stderr)
+        return 2
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"点位文件格式错误：{exc}", file=sys.stderr)
+        return 3
+
+    execute = args.confirm_motion == CONFIRM
+    config = load_config(args.config)
+
+    try:
+        with AuboSdkClient(config) as client:
+            current = client.current_joints()
+            differences = [
+                abs(target_value - current_value)
+                for target_value, current_value in zip(target, current)
+            ]
+
+            print(f"目标点位：{args.name}")
+            print("当前关节角：")
+            print(json.dumps(current, ensure_ascii=False, indent=2))
+            print("目标关节角：")
+            print(json.dumps(target, ensure_ascii=False, indent=2))
+            print(f"最大关节变化：{max(differences):.4f} rad")
+
+            if not execute:
+                print("\n当前是预览模式，机械臂不会运动。")
+                print("确认后加 --confirm-motion 才会真实执行。")
+                return 0
+
+            client.move_to_joints(target)
+
+            deadline = time.monotonic() + args.timeout
+            while time.monotonic() < deadline:
+                actual = client.current_joints()
+                error = max(
+                    abs(actual_value - target_value)
+                    for actual_value, target_value in zip(actual, target)
+                )
+
+                if error <= args.tolerance:
+                    print(
+                        f"已到达点位：{args.name}，"
+                        f"最大误差={error:.6f} rad"
+                    )
+                    return 0
+
+                time.sleep(0.2)
+
+            print("等待到位超时。", file=sys.stderr)
+            return 4
+
+    except AuboSdkError as exc:
+        print(f"机械臂执行失败：{exc}", file=sys.stderr)
+        return 5
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+config/robot.local.json
+.env
+.DS_Store
+.runtime/
+logs/

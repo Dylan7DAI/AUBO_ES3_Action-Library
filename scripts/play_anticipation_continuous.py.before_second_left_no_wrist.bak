@@ -1,0 +1,1166 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import sys
+import time
+from pathlib import Path
+from typing import List, Sequence
+
+
+# ============================================================
+# 项目路径与固定配置
+# ============================================================
+
+ROOT = Path(__file__).resolve().parents[1]
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from aubo_es3_actions import load_config
+from aubo_es3_actions.sdk_client import (
+    AuboSdkClient,
+    AuboSdkError,
+    JOINT_NAMES,
+)
+
+
+POSE_FILE = (
+    ROOT
+    / "config"
+    / "emotion_poses_new_es3.json"
+)
+
+CONFIRM = "I_UNDERSTAND_THIS_WILL_MOVE_THE_ROBOT"
+
+# AUBO PathBuffer参数
+PATH_BUFFER_CUBIC_SPLINE = 2
+PATH_SAMPLE_TIME = 0.01
+
+# 轨迹基础参数
+BASE_TRAJECTORY_SPEED = 1.50
+BASE_MIN_SEGMENT_TIME = 0.24
+
+MAX_VELOCITY = 2.80
+MAX_ACCELERATION = 6.00
+
+
+# ============================================================
+# 基础工具
+# ============================================================
+
+def load_pose(
+    data: dict,
+    pose_name: str,
+) -> List[float]:
+    """按照固定关节顺序读取示教点位。"""
+    try:
+        joints = (
+            data["poses"][pose_name]
+            ["joint_positions_rad"]
+        )
+
+        return [
+            float(joints[joint_name])
+            for joint_name in JOINT_NAMES
+        ]
+
+    except KeyError as exc:
+        raise KeyError(
+            f"点位 {pose_name} 不完整，"
+            f"缺少字段：{exc}"
+        ) from exc
+
+
+def max_joint_difference(
+    pose_a: Sequence[float],
+    pose_b: Sequence[float],
+) -> float:
+    """计算两个姿态最大的单关节角度差。"""
+    return max(
+        abs(value_a - value_b)
+        for value_a, value_b
+        in zip(pose_a, pose_b)
+    )
+
+
+def check_result(
+    result: object,
+    action_name: str,
+) -> None:
+    """检查AUBO SDK接口返回结果。"""
+    if result is False:
+        raise AuboSdkError(
+            f"{action_name}失败，接口返回False"
+        )
+
+    if (
+        isinstance(result, int)
+        and not isinstance(result, bool)
+        and result != 0
+    ):
+        raise AuboSdkError(
+            f"{action_name}失败，返回码：{result}"
+        )
+
+
+def make_buffer_name(
+    *,
+    expand_scale: float,
+    first_scale: float,
+    second_scale: float,
+    down_scale: float,
+    center_blend: float,
+    wrist_swing_deg: float,
+    poses: Sequence[Sequence[float]],
+) -> str:
+    """
+    根据参数和示教点生成缓存名称。
+
+    修改参数、腕部角度或重新示教点位后，
+    会自动使用新的缓存，避免误用旧轨迹。
+    """
+    signature = {
+        "version": 3,
+        "expand_scale": round(expand_scale, 4),
+        "first_scale": round(first_scale, 4),
+        "second_scale": round(second_scale, 4),
+        "down_scale": round(down_scale, 4),
+        "center_blend": round(center_blend, 4),
+        "wrist_swing_deg": round(
+            wrist_swing_deg,
+            4,
+        ),
+        "poses": [
+            [
+                round(float(value), 6)
+                for value in pose
+            ]
+            for pose in poses
+        ],
+    }
+
+    encoded = json.dumps(
+        signature,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    digest = hashlib.sha1(
+        encoded
+    ).hexdigest()[:10]
+
+    return f"anti_wrist_v3_{digest}"
+
+
+def calculate_base_duration(
+    start: Sequence[float],
+    end: Sequence[float],
+) -> float:
+    """计算单段动作的基础时长。"""
+    distance = max_joint_difference(
+        start,
+        end,
+    )
+
+    return max(
+        BASE_MIN_SEGMENT_TIME,
+        1.5 * distance / BASE_TRAJECTORY_SPEED,
+    )
+
+
+# ============================================================
+# 完整连续轨迹
+# ============================================================
+
+def build_continuous_trajectory(
+    pre_start: List[float],
+    center: List[float],
+    left: List[float],
+    right: List[float],
+    look_down: List[float],
+    expand_scale: float,
+    first_scale: float,
+    second_scale: float,
+    down_scale: float,
+    center_blend: float,
+    wrist_swing_deg: float,
+) -> tuple[
+    List[List[float]],
+    List[float],
+]:
+    """
+    构建单条完整连续轨迹。
+
+    动作顺序：
+
+    pre_start
+    → 展开朝向用户
+    → 左看，同时wrist3正向旋转
+    → 回正
+    → 右看，同时wrist3反向旋转
+    → 回正
+    → 再次左看，同时wrist3正向旋转
+    → 回正
+    → 低头
+
+    wrist_swing_deg为负数时，
+    左右腕部旋转方向会反过来。
+    """
+
+    try:
+        wrist3_index = JOINT_NAMES.index(
+            "wrist3_joint"
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "JOINT_NAMES中没有找到"
+            "wrist3_joint，无法加入腕部动作"
+        ) from exc
+
+    # --------------------------------------------------------
+    # 给左右观察点增加wrist3旋转
+    # --------------------------------------------------------
+
+    # 将腕部旋转角度转换为弧度
+    wrist_offset = math.radians(
+        wrist_swing_deg
+    )
+
+    # 复制左右观察点，避免修改原始示教数据
+    left_with_wrist = list(left)
+    right_with_wrist = list(right)
+
+    # 始终以正中姿态的wrist3为基准，
+    # 避免左右示教点原有角度抵消新增旋转
+    center_wrist3 = center[
+        wrist3_index
+    ]
+
+    # 左看时，wrist3相对正中正向旋转
+    left_with_wrist[
+        wrist3_index
+    ] = center_wrist3 + wrist_offset
+
+    # 右看时，wrist3相对正中反向旋转
+    right_with_wrist[
+        wrist3_index
+    ] = center_wrist3 - wrist_offset
+
+    # 完整动作关键点
+    # 实际运动关键点：
+    # 左右观察点包含wrist3配合旋转
+    anchors = [
+        pre_start,
+        center,
+        left_with_wrist,
+        center,
+        right_with_wrist,
+        center,
+        left_with_wrist,
+        center,
+        look_down,
+    ]
+
+    # 时间计算关键点：
+    # 使用原始左右观察点，不让20°腕部旋转
+    # 把整个转头动作的时长拉长
+    # 仅用于计算转头时长：
+    # 将左右观察点的wrist3统一为新的正中腕部角度。
+    # 实际运动仍然保留左右20°腕部旋转。
+    left_timing = list(left)
+    right_timing = list(right)
+
+    center_wrist3_for_timing = center[
+        wrist3_index
+    ]
+
+    left_timing[
+        wrist3_index
+    ] = center_wrist3_for_timing
+
+    right_timing[
+        wrist3_index
+    ] = center_wrist3_for_timing
+
+    timing_anchors = [
+        # 展开段仍使用真实腕部变化
+        pre_start,
+        center,
+
+        # 左右转头时忽略wrist3对时长的影响
+        left_timing,
+        center,
+        right_timing,
+        center,
+        left_timing,
+        center,
+
+        # 低头段仍使用真实低头腕部角度
+        look_down,
+    ]
+
+    segment_scales = [
+        # pre_start → center
+        expand_scale,
+
+        # center → left
+        first_scale,
+
+        # left → center
+        first_scale,
+
+        # center → right
+        first_scale,
+
+        # right → center
+        first_scale,
+
+        # center → left
+        second_scale,
+
+        # left → center
+        second_scale,
+
+        # center → look_down
+        down_scale,
+    ]
+
+    segment_steps: List[int] = []
+    segment_durations: List[float] = []
+
+    # --------------------------------------------------------
+    # 计算每段时长和轨迹点数量
+    # --------------------------------------------------------
+
+    for index in range(len(anchors) - 1):
+        base_duration = calculate_base_duration(
+            timing_anchors[index],
+            timing_anchors[index + 1],
+        )
+
+        requested_duration = (
+            base_duration
+            * segment_scales[index]
+        )
+
+        steps = max(
+            3,
+            int(
+                round(
+                    requested_duration
+                    / PATH_SAMPLE_TIME
+                )
+            ),
+        )
+
+        actual_duration = (
+            steps * PATH_SAMPLE_TIME
+        )
+
+        segment_steps.append(steps)
+        segment_durations.append(
+            actual_duration
+        )
+
+    # --------------------------------------------------------
+    # 计算各关键点累计时间
+    # --------------------------------------------------------
+
+    anchor_times = [0.0]
+
+    for duration in segment_durations:
+        anchor_times.append(
+            anchor_times[-1] + duration
+        )
+
+    # --------------------------------------------------------
+    # 计算关键点切线速度
+    # --------------------------------------------------------
+
+    tangents: List[List[float]] = []
+
+    for index in range(len(anchors)):
+        # 整个动作起点和终点速度为0
+        if (
+            index == 0
+            or index == len(anchors) - 1
+        ):
+            tangents.append(
+                [0.0] * len(JOINT_NAMES)
+            )
+            continue
+
+        total_time = (
+            anchor_times[index + 1]
+            - anchor_times[index - 1]
+        )
+
+        tangent = [
+            (
+                anchors[index + 1][joint_index]
+                - anchors[index - 1][joint_index]
+            )
+            / total_time
+            for joint_index in range(
+                len(JOINT_NAMES)
+            )
+        ]
+
+        # index=1对应第一次到达face_user。
+        # 保留部分切线速度，使展开后自然进入左看。
+        if index == 1:
+            tangent = [
+                value * center_blend
+                for value in tangent
+            ]
+
+        tangents.append(tangent)
+
+    # --------------------------------------------------------
+    # Hermite插值生成连续轨迹
+    # --------------------------------------------------------
+
+    trajectory: List[List[float]] = []
+
+    for segment_index in range(
+        len(anchors) - 1
+    ):
+        start = anchors[segment_index]
+        end = anchors[segment_index + 1]
+
+        start_velocity = tangents[
+            segment_index
+        ]
+
+        end_velocity = tangents[
+            segment_index + 1
+        ]
+
+        steps = segment_steps[
+            segment_index
+        ]
+
+        duration = segment_durations[
+            segment_index
+        ]
+
+        # 每一段不重复添加终点，
+        # 终点由下一段的起点自然连接。
+        for step_index in range(steps):
+            u = step_index / steps
+
+            u2 = u * u
+            u3 = u2 * u
+
+            h00 = (
+                2.0 * u3
+                - 3.0 * u2
+                + 1.0
+            )
+
+            h10 = (
+                u3
+                - 2.0 * u2
+                + u
+            )
+
+            h01 = (
+                -2.0 * u3
+                + 3.0 * u2
+            )
+
+            h11 = (
+                u3
+                - u2
+            )
+
+            point: List[float] = []
+
+            for joint_index in range(
+                len(JOINT_NAMES)
+            ):
+                value = (
+                    h00
+                    * start[joint_index]
+
+                    + h10
+                    * duration
+                    * start_velocity[joint_index]
+
+                    + h01
+                    * end[joint_index]
+
+                    + h11
+                    * duration
+                    * end_velocity[joint_index]
+                )
+
+                point.append(value)
+
+            trajectory.append(point)
+
+    # 最终停在低头示教点
+    trajectory.append(
+        list(look_down)
+    )
+
+    return trajectory, segment_durations
+
+
+# ============================================================
+# PathBuffer上传和计算
+# ============================================================
+
+def append_in_chunks(
+    motion: object,
+    buffer_name: str,
+    trajectory: List[List[float]],
+    *,
+    chunk_size: int = 250,
+) -> None:
+    """分批上传轨迹点，避免单次数据过大。"""
+    for start_index in range(
+        0,
+        len(trajectory),
+        chunk_size,
+    ):
+        chunk = trajectory[
+            start_index:
+            start_index + chunk_size
+        ]
+
+        result = motion.pathBufferAppend(
+            buffer_name,
+            chunk,
+        )
+
+        check_result(
+            result,
+            (
+                f"上传轨迹点"
+                f"{start_index}—"
+                f"{start_index + len(chunk) - 1}"
+            ),
+        )
+
+
+def wait_for_buffer_valid(
+    motion: object,
+    buffer_name: str,
+    *,
+    timeout: float = 90.0,
+) -> None:
+    """等待控制器完成完整轨迹计算。"""
+    deadline = time.monotonic() + timeout
+    last_print_time = 0.0
+
+    while time.monotonic() < deadline:
+        if motion.pathBufferValid(
+            buffer_name
+        ):
+            print("完整连续轨迹计算成功。")
+            return
+
+        now = time.monotonic()
+
+        if now - last_print_time >= 1.0:
+            print("完整连续轨迹仍在计算……")
+            last_print_time = now
+
+        time.sleep(0.20)
+
+    raise AuboSdkError(
+        "等待90秒后完整连续轨迹仍然无效"
+    )
+
+
+def get_buffer_names(
+    motion: object,
+) -> List[str]:
+    """读取控制器中已有的轨迹缓存名称。"""
+    try:
+        result = motion.pathBufferList()
+
+        if result is None:
+            return []
+
+        return [
+            str(name)
+            for name in result
+        ]
+
+    except Exception:
+        return []
+
+
+def prepare_buffer(
+    motion: object,
+    buffer_name: str,
+    trajectory: List[List[float]],
+    *,
+    rebuild: bool,
+) -> bool:
+    """
+    创建或复用完整轨迹缓存。
+
+    返回：
+    True：复用了已有缓存
+    False：本次创建了新缓存
+    """
+    buffer_names = get_buffer_names(
+        motion
+    )
+
+    buffer_exists = (
+        buffer_name in buffer_names
+    )
+
+    if buffer_exists and not rebuild:
+        try:
+            if motion.pathBufferValid(
+                buffer_name
+            ):
+                print(
+                    "复用已有完整轨迹缓存，"
+                    "无需重新计算。"
+                )
+                return True
+
+        except Exception:
+            pass
+
+    if buffer_exists:
+        print("删除旧的同名完整轨迹缓存。")
+
+        try:
+            motion.pathBufferFree(
+                buffer_name
+            )
+        except Exception:
+            pass
+
+    print("正在创建完整连续轨迹缓存……")
+    print(f"缓存名称：{buffer_name}")
+    print(f"轨迹点数：{len(trajectory)}")
+
+    result = motion.pathBufferAlloc(
+        buffer_name,
+        PATH_BUFFER_CUBIC_SPLINE,
+        len(trajectory),
+    )
+
+    check_result(
+        result,
+        "创建完整轨迹缓存",
+    )
+
+    append_in_chunks(
+        motion,
+        buffer_name,
+        trajectory,
+    )
+
+    acceleration_limits = [
+        MAX_ACCELERATION
+    ] * len(JOINT_NAMES)
+
+    velocity_limits = [
+        MAX_VELOCITY
+    ] * len(JOINT_NAMES)
+
+    print("正在计算完整连续轨迹……")
+
+    result = motion.pathBufferEval(
+        buffer_name,
+        acceleration_limits,
+        velocity_limits,
+        PATH_SAMPLE_TIME,
+    )
+
+    check_result(
+        result,
+        "计算完整连续轨迹",
+    )
+
+    wait_for_buffer_valid(
+        motion,
+        buffer_name,
+        timeout=90.0,
+    )
+
+    return False
+
+
+# ============================================================
+# 主程序
+# ============================================================
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "单PathBuffer完整期待动作："
+            "展开、左右观察、腕部配合、最后低头"
+        )
+    )
+
+    parser.add_argument(
+        "--expand-scale",
+        type=float,
+        default=7.0,
+        help=(
+            "展开段时间比例，"
+            "数值越大越慢，默认7.0"
+        ),
+    )
+
+    parser.add_argument(
+        "--first-scale",
+        type=float,
+        default=4.0,
+        help=(
+            "第一次左右观察时间比例，"
+            "默认4.0"
+        ),
+    )
+
+    parser.add_argument(
+        "--second-scale",
+        type=float,
+        default=7.0,
+        help=(
+            "第二次左看时间比例，"
+            "默认7.0"
+        ),
+    )
+
+    parser.add_argument(
+        "--down-scale",
+        type=float,
+        default=7.5,
+        help=(
+            "最后低头时间比例，"
+            "默认7.5"
+        ),
+    )
+
+    parser.add_argument(
+        "--center-blend",
+        type=float,
+        default=0.25,
+        help=(
+            "展开和第一次左看之间的"
+            "连续程度，默认0.25"
+        ),
+    )
+
+    parser.add_argument(
+        "--wrist-swing-deg",
+        type=float,
+        default=30.0,
+        help=(
+            "左右观察时wrist3配合旋转角度，"
+            "默认6度；负数会反转方向"
+        ),
+    )
+
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="只准备轨迹缓存，不运动",
+    )
+
+    parser.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="强制重新创建轨迹缓存",
+    )
+
+    parser.add_argument(
+        "--confirm-motion",
+        default="",
+        help="真实运动确认文本",
+    )
+
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="可选机器人配置文件",
+    )
+
+    args = parser.parse_args()
+
+    # --------------------------------------------------------
+    # 参数范围检查
+    # --------------------------------------------------------
+
+    if not 4.0 <= args.expand_scale <= 12.0:
+        print(
+            "expand-scale必须在"
+            "4.0到12.0之间。",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not 1.0 <= args.first_scale <= 8.0:
+        print(
+            "first-scale必须在"
+            "1.0到8.0之间。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not 1.0 <= args.second_scale <= 8.0:
+        print(
+            "second-scale必须在"
+            "1.0到8.0之间。",
+            file=sys.stderr,
+        )
+        return 3
+
+    if not 1.0 <= args.down_scale <= 10.0:
+        print(
+            "down-scale必须在"
+            "1.0到10.0之间。",
+            file=sys.stderr,
+        )
+        return 4
+
+    if not 0.0 <= args.center_blend <= 0.40:
+        print(
+            "center-blend必须在"
+            "0.0到0.40之间。",
+            file=sys.stderr,
+        )
+        return 5
+
+    if not -50.0 <= args.wrist_swing_deg <= 50.0:
+        print(
+            "wrist-swing-deg必须在"
+            "-50度到50度之间。",
+            file=sys.stderr,
+        )
+        return 6
+
+    # --------------------------------------------------------
+    # 读取示教点并生成完整轨迹
+    # --------------------------------------------------------
+
+    try:
+        data = json.loads(
+            POSE_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        pre_start = load_pose(
+            data,
+            "pre_start_rest",
+        )
+
+        center = load_pose(
+            data,
+            "anticipation_face_user",
+        )
+
+        left = load_pose(
+            data,
+            "anticipation_idle_left",
+        )
+
+        right = load_pose(
+            data,
+            "anticipation_idle_right",
+        )
+
+        look_down = load_pose(
+            data,
+            "anticipation_look_down",
+        )
+
+        (
+            trajectory,
+            durations,
+        ) = build_continuous_trajectory(
+            pre_start,
+            center,
+            left,
+            right,
+            look_down,
+            args.expand_scale,
+            args.first_scale,
+            args.second_scale,
+            args.down_scale,
+            args.center_blend,
+            args.wrist_swing_deg,
+        )
+
+    except (
+        OSError,
+        KeyError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        print(
+            f"读取或生成轨迹失败：{exc}",
+            file=sys.stderr,
+        )
+        return 7
+
+    buffer_name = make_buffer_name(
+        expand_scale=args.expand_scale,
+        first_scale=args.first_scale,
+        second_scale=args.second_scale,
+        down_scale=args.down_scale,
+        center_blend=args.center_blend,
+        wrist_swing_deg=args.wrist_swing_deg,
+        poses=[
+            pre_start,
+            center,
+            left,
+            right,
+            look_down,
+        ],
+    )
+
+    expand_duration = durations[0]
+    first_duration = sum(
+        durations[1:5]
+    )
+    second_duration = sum(
+        durations[5:7]
+    )
+    down_duration = durations[7]
+
+    # --------------------------------------------------------
+    # 预览模式
+    # --------------------------------------------------------
+
+    if (
+        not args.prepare_only
+        and args.confirm_motion != CONFIRM
+    ):
+        print(
+            "当前为预览模式，"
+            "机械臂不会运动。"
+        )
+
+        print()
+        print("单条连续轨迹：")
+        print(
+            "pre_start → 朝向用户 "
+            "→ 左看+腕部旋转 "
+            "→ 右看+腕部反转 "
+            "→ 左看+腕部旋转 "
+            "→ 回正 → 低头"
+        )
+
+        print()
+        print(
+            f"展开预计时长："
+            f"{expand_duration:.2f}秒"
+        )
+
+        print(
+            f"第一次观察预计时长："
+            f"{first_duration:.2f}秒"
+        )
+
+        print(
+            f"第二次左看预计时长："
+            f"{second_duration:.2f}秒"
+        )
+
+        print(
+            f"低头预计时长："
+            f"{down_duration:.2f}秒"
+        )
+
+        print(
+            f"总预计时长："
+            f"{sum(durations):.2f}秒"
+        )
+
+        print(
+            f"腕部配合幅度："
+            f"{args.wrist_swing_deg:.2f}度"
+        )
+
+        if args.wrist_swing_deg >= 0:
+            print(
+                "腕部方向："
+                "左看正向，右看反向"
+            )
+        else:
+            print(
+                "腕部方向："
+                "左看反向，右看正向"
+            )
+
+        print(
+            f"朝向用户处连续系数："
+            f"{args.center_blend:.2f}"
+        )
+
+        print(
+            f"轨迹点数："
+            f"{len(trajectory)}"
+        )
+
+        print(
+            f"缓存名称："
+            f"{buffer_name}"
+        )
+
+        return 0
+
+    # --------------------------------------------------------
+    # 连接机器人
+    # --------------------------------------------------------
+
+    config = load_config(
+        args.config
+    )
+
+    try:
+        with AuboSdkClient(config) as client:
+            current = client.current_joints()
+
+            start_error = max_joint_difference(
+                current,
+                pre_start,
+            )
+
+            if start_error > 0.10:
+                raise AuboSdkError(
+                    "机械臂当前不在"
+                    "pre_start_rest附近。"
+                    f"最大误差：{start_error:.4f} rad。"
+                    "请先回到pre_start_rest。"
+                )
+
+            robot = client._require_robot()
+            motion = robot.getMotionControl()
+
+            reused = prepare_buffer(
+                motion,
+                buffer_name,
+                trajectory,
+                rebuild=args.rebuild_cache,
+            )
+
+            if args.prepare_only:
+                print()
+                print("完整连续轨迹准备完成。")
+
+                if reused:
+                    print(
+                        "本次复用了已有缓存。"
+                    )
+                else:
+                    print(
+                        "本次创建了新的缓存。"
+                    )
+
+                return 0
+
+            client.prepare_for_motion()
+
+            print()
+            print("=" * 56)
+            print("开始完整期待动作")
+            print("=" * 56)
+
+            print(
+                f"展开比例："
+                f"{args.expand_scale:.2f}"
+            )
+
+            print(
+                f"第一次观察比例："
+                f"{args.first_scale:.2f}"
+            )
+
+            print(
+                f"第二次观察比例："
+                f"{args.second_scale:.2f}"
+            )
+
+            print(
+                f"低头比例："
+                f"{args.down_scale:.2f}"
+            )
+
+            print(
+                f"腕部旋转幅度："
+                f"{args.wrist_swing_deg:.2f}度"
+            )
+
+            result = motion.movePathBuffer(
+                buffer_name
+            )
+
+            check_result(
+                result,
+                "执行完整连续轨迹",
+            )
+
+            final_joints = (
+                client.current_joints()
+            )
+
+            final_error = max_joint_difference(
+                final_joints,
+                look_down,
+            )
+
+            print()
+            print("=" * 56)
+            print("完整期待动作执行完成")
+            print("=" * 56)
+
+            print(
+                f"最终低头点误差："
+                f"{final_error:.6f} rad"
+            )
+
+        return 0
+
+    except AuboSdkError as exc:
+        print()
+        print(
+            f"完整连续动作执行失败：{exc}",
+            file=sys.stderr,
+        )
+
+        print(
+            "出现30014碰撞提示时，"
+            "立即停止并在AuboStudio中恢复。",
+            file=sys.stderr,
+        )
+
+        return 8
+
+    except AttributeError as exc:
+        print(
+            f"SDK接口缺失：{exc}",
+            file=sys.stderr,
+        )
+        return 9
+
+    except KeyboardInterrupt:
+        print()
+        print("Python流程已中止。")
+        print(
+            "机械臂仍在运动时，"
+            "请按实体Stop按钮。"
+        )
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

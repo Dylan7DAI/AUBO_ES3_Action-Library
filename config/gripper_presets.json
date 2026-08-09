@@ -1,0 +1,79 @@
+{
+  "presets": {
+    "glass_good": {
+      "name": "glass_good",
+      "width": 65,
+      "force": 15,
+      "saved_at": "2026-07-28T22:15:47",
+      "note": "stable glass grip",
+      "feedback": {
+        "modbus_device": "/dev/ttyRobotTool,115200,N,8,1",
+        "slave_id": 1,
+        "added_signals": {
+          "codex_lebo_position": "exists",
+          "codex_lebo_torque": "exists",
+          "codex_lebo_done": "exists",
+          "codex_lebo_stroke_not_found": "exists",
+          "codex_lebo_speed": "exists"
+        },
+        "feedback": {
+          "done": {
+            "name": "codex_lebo_done",
+            "value": 0,
+            "error": 0
+          },
+          "position": {
+            "name": "codex_lebo_position",
+            "value": 49,
+            "error": 0
+          },
+          "speed": {
+            "name": "codex_lebo_speed",
+            "value": 0,
+            "error": 0
+          },
+          "stroke_not_found": {
+            "name": "codex_lebo_stroke_not_found",
+            "value": 0,
+            "error": 0
+          },
+          "torque": {
+            "name": "codex_lebo_torque",
+            "value": 0,
+            "error": 0
+          }
+        },
+        "is_done": false
+      },
+      "robot_state": {
+        "recorded_at": "2026-07-28T22:16:00",
+        "tcp_pose": [
+          0.6130190596683848,
+          0.029165851357519895,
+          0.05098540547258608,
+          -2.5346763131885215,
+          1.458016885121347,
+          -2.4546471302968733
+        ],
+        "position_xyz_m": {
+          "x": 0.6130190596683848,
+          "y": 0.029165851357519895,
+          "z": 0.05098540547258608
+        },
+        "orientation_rpy_rad": {
+          "rx": -2.5346763131885215,
+          "ry": 1.458016885121347,
+          "rz": -2.4546471302968733
+        },
+        "joint_positions_rad": {
+          "shoulder_joint": 0.2731491580818817,
+          "upperArm_joint": -1.452385835332048,
+          "foreArm_joint": 0.31719550103946764,
+          "wrist1_joint": -1.4669068451049834,
+          "wrist2_joint": 4.907804294870824,
+          "wrist3_joint": 1.5260844150554163
+        }
+      }
+    }
+  }
+}

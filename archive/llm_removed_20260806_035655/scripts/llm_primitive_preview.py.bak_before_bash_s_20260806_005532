@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""调用LLM生成结果回应动作原语编排；本脚本永远不连接或控制机械臂。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from decimal import Decimal
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PROMPT = ROOT / "config" / "primitive_choreography_prompt.txt"
+
+POSITIVE_PRIMITIVES = {"rise", "arm_pulse"}
+NEGATIVE_PRIMITIVES = {"turn_away", "contract", "breathe"}
+POSITIVE_EMOTIONS = {"joy", "excitement", "relief"}
+NEGATIVE_EMOTIONS = {"disappointment", "dejection"}
+
+NEUTRAL_EMOTION_STATE = {
+    "emotion_name": "neutral",
+    "valence": 0.00,
+    "arousal": 0.00,
+    "intensity": 0.00,
+    "persistence": 0.00,
+    "unexpectedness": 0.00,
+}
+
+
+class EmotionState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    emotion_name: str = Field(min_length=1, max_length=64)
+    valence: float = Field(ge=-1.0, le=1.0)
+    arousal: float = Field(ge=0.0, le=1.0)
+    intensity: float = Field(ge=0.0, le=1.0)
+    persistence: float = Field(ge=0.0, le=1.0)
+    unexpectedness: float = Field(ge=0.0, le=1.0)
+
+
+class PrimitiveStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    primitive: Literal[
+        "rise",
+        "arm_pulse",
+        "turn_away",
+        "contract",
+        "breathe",
+    ]
+    amplitude_scale: float = Field(ge=0.60, le=1.00)
+    speed_scale: float = Field(ge=0.70, le=1.20)
+    repeat: int = Field(ge=1, le=3)
+
+
+class ChoreographyPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    emotion_state: EmotionState
+    transition_type: Literal[
+        "continuation",
+        "accumulation",
+        "reversal",
+        "fluctuation",
+    ]
+    brief_reason: str = Field(min_length=1, max_length=100)
+    global_tempo: float = Field(ge=0.75, le=1.20)
+    steps: List[PrimitiveStep] = Field(min_length=1, max_length=3)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="只调用LLM生成五个动作原语的编排JSON；机械臂不会运动"
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+        help="OpenAI模型名；默认读取OPENAI_MODEL，否则使用gpt-5-mini",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        default=str(DEFAULT_PROMPT),
+        help="动作编排系统提示词文件",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=0,
+        help="0表示不限回合数",
+    )
+    return parser
+
+
+def normalize_result(text: str) -> Optional[str]:
+    value = text.strip().lower()
+    if value == "1":
+        return "correct"
+    if value == "0":
+        return "incorrect"
+    return None
+
+
+def expected_transition_type(result_history: List[str]) -> str:
+    """按最终Prompt给出的判定顺序计算本轮变化类型。"""
+    if not result_history:
+        raise ValueError("result_history不能为空")
+    if any(item not in {"correct", "incorrect"} for item in result_history):
+        raise ValueError("result_history只能包含correct或incorrect")
+
+    if len(result_history) >= 3:
+        recent_three = result_history[-3:]
+        if (
+            recent_three[0] != recent_three[1]
+            and recent_three[1] != recent_three[2]
+        ):
+            return "fluctuation"
+
+    if len(result_history) == 1:
+        return "continuation"
+    if result_history[-1] != result_history[-2]:
+        return "reversal"
+    return "accumulation"
+
+
+def _has_at_most_two_decimal_places(value: float) -> bool:
+    return Decimal(str(value)).as_tuple().exponent >= -2
+
+
+def validate_plan_for_result(
+    plan: ChoreographyPlan,
+    current_result: str,
+    result_history: List[str],
+) -> None:
+    if current_result not in {"correct", "incorrect"}:
+        raise ValueError("current_result只能是correct或incorrect")
+    if not result_history or result_history[-1] != current_result:
+        raise ValueError("result_history最后一项必须与current_result一致")
+
+    allowed = (
+        POSITIVE_PRIMITIVES
+        if current_result == "correct"
+        else NEGATIVE_PRIMITIVES
+    )
+    used = {step.primitive for step in plan.steps}
+    invalid = sorted(used - allowed)
+    if invalid:
+        raise ValueError(
+            f"本轮{current_result}出现跨效价原语：{', '.join(invalid)}"
+        )
+
+    emotion_name = plan.emotion_state.emotion_name
+    allowed_emotions = (
+        POSITIVE_EMOTIONS
+        if current_result == "correct"
+        else NEGATIVE_EMOTIONS
+    )
+    if emotion_name not in allowed_emotions:
+        raise ValueError(
+            f"本轮{current_result}不能使用emotion_name={emotion_name}"
+        )
+
+    valence = plan.emotion_state.valence
+    if current_result == "correct" and valence <= 0:
+        raise ValueError("猜对时valence必须大于0")
+    if current_result == "incorrect" and valence >= 0:
+        raise ValueError("猜错时valence必须小于0")
+
+    expected_transition = expected_transition_type(result_history)
+    if plan.transition_type != expected_transition:
+        raise ValueError(
+            "transition_type与result_history不一致："
+            f"应为{expected_transition}，实际为{plan.transition_type}"
+        )
+
+    total_repeat = sum(step.repeat for step in plan.steps)
+    if total_repeat > 4:
+        raise ValueError(f"所有steps的repeat总和不得超过4，实际为{total_repeat}")
+
+    if "\n" in plan.brief_reason or "\r" in plan.brief_reason:
+        raise ValueError("brief_reason必须是单行短句")
+    if not any("\u4e00" <= char <= "\u9fff" for char in plan.brief_reason):
+        raise ValueError("brief_reason必须使用简短中文")
+
+    decimal_values = {
+        "valence": plan.emotion_state.valence,
+        "arousal": plan.emotion_state.arousal,
+        "intensity": plan.emotion_state.intensity,
+        "persistence": plan.emotion_state.persistence,
+        "unexpectedness": plan.emotion_state.unexpectedness,
+        "global_tempo": plan.global_tempo,
+    }
+    for index, step in enumerate(plan.steps, start=1):
+        decimal_values[f"steps[{index}].amplitude_scale"] = step.amplitude_scale
+        decimal_values[f"steps[{index}].speed_scale"] = step.speed_scale
+    excessive_precision = [
+        name
+        for name, value in decimal_values.items()
+        if not _has_at_most_two_decimal_places(value)
+    ]
+    if excessive_precision:
+        raise ValueError(
+            "以下数值超过两位小数：" + ", ".join(excessive_precision)
+        )
+
+
+def call_openai(
+    model: str,
+    system_prompt: str,
+    round_input: Dict[str, Any],
+) -> ChoreographyPlan:
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "缺少openai库。请先运行：python3 -m pip install --user -r requirements.txt"
+        ) from exc
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "未设置OPENAI_API_KEY。请先在终端设置密钥，密钥不要写进代码。"
+        )
+
+    client = OpenAI()
+    response = client.responses.parse(
+        model=model,
+        instructions=system_prompt,
+        input=json.dumps(round_input, ensure_ascii=False),
+        text_format=ChoreographyPlan,
+    )
+    plan = response.output_parsed
+    if plan is None:
+        raise RuntimeError("LLM没有返回可解析的动作编排。")
+
+    try:
+        validate_plan_for_result(
+            plan,
+            str(round_input["current_result"]),
+            list(round_input["result_history"]),
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"LLM输出未通过最终Prompt本地校验：{exc}") from exc
+    return plan
+
+
+def format_plan_json(plan: ChoreographyPlan) -> str:
+    """输出合法JSON，并按Prompt要求把所有小数显示为两位。"""
+    emotion = plan.emotion_state
+    lines = [
+        "{",
+        '  "emotion_state": {',
+        f'    "emotion_name": {json.dumps(emotion.emotion_name, ensure_ascii=False)},',
+        f'    "valence": {emotion.valence:.2f},',
+        f'    "arousal": {emotion.arousal:.2f},',
+        f'    "intensity": {emotion.intensity:.2f},',
+        f'    "persistence": {emotion.persistence:.2f},',
+        f'    "unexpectedness": {emotion.unexpectedness:.2f}',
+        "  },",
+        f'  "transition_type": {json.dumps(plan.transition_type)},',
+        f'  "brief_reason": {json.dumps(plan.brief_reason, ensure_ascii=False)},',
+        f'  "global_tempo": {plan.global_tempo:.2f},',
+        '  "steps": [',
+    ]
+    for index, step in enumerate(plan.steps):
+        comma = "," if index < len(plan.steps) - 1 else ""
+        lines.extend(
+            [
+                "    {",
+                f'      "primitive": {json.dumps(step.primitive)},',
+                f'      "amplitude_scale": {step.amplitude_scale:.2f},',
+                f'      "speed_scale": {step.speed_scale:.2f},',
+                f'      "repeat": {step.repeat}',
+                f"    }}{comma}",
+            ]
+        )
+    lines.extend(["  ]", "}"])
+    return "\n".join(lines)
+
+
+def append_log(path: Path, record: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.max_rounds < 0:
+        print("max-rounds不能小于0。", file=sys.stderr)
+        return 2
+
+    try:
+        system_prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"读取提示词失败：{exc}", file=sys.stderr)
+        return 2
+
+    print("模式：LLM动作原语编排预览（本脚本不会连接机械臂）")
+    print(f"模型：{args.model}")
+    print("每轮输入：1=猜对，0=猜错，e=结束")
+
+    history: List[str] = []
+    previous_emotion_state: Dict[str, Any] = dict(NEUTRAL_EMOTION_STATE)
+    previous_plan: Optional[Dict[str, Any]] = None
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_path = ROOT / "logs" / f"llm_primitive_preview_{timestamp}.jsonl"
+
+    while True:
+        start_text = input("\n待机状态 [s=开始/e=退出]：").strip().lower()
+        if start_text == "s":
+            break
+        if start_text == "e":
+            print("\n结束，共完成0轮。")
+            return 0
+        print("输入无效，请输入s或e。")
+
+    while True:
+        if args.max_rounds and len(history) >= args.max_rounds:
+            print(f"已达到{args.max_rounds}轮。")
+            break
+
+        text = input(f"\n第{len(history) + 1}轮结果 [1/0/e]：").strip()
+        if text.lower() == "e":
+            break
+
+        current_result = normalize_result(text)
+        if current_result is None:
+            print("输入无效，请输入1、0或e。")
+            continue
+
+        candidate_history = history + [current_result]
+        round_input = {
+            "current_result": current_result,
+            "result_history": candidate_history,
+            "previous_emotion_state": previous_emotion_state,
+            "previous_plan": previous_plan,
+        }
+
+        print("正在调用LLM生成动作编排……", flush=True)
+        try:
+            plan = call_openai(args.model, system_prompt, round_input)
+        except Exception as exc:
+            print(f"本轮调用失败：{exc}", file=sys.stderr)
+            print("本轮不会写入历史，可以检查后重新输入。")
+            continue
+
+        plan_dict = plan.model_dump(mode="json")
+        print(format_plan_json(plan))
+
+        append_log(
+            log_path,
+            {
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "input": round_input,
+                "choreography": plan_dict,
+                "robot_motion": False,
+            },
+        )
+        history = candidate_history
+        previous_emotion_state = dict(plan_dict["emotion_state"])
+        previous_plan = plan_dict
+
+    print(f"\n结束，共完成{len(history)}轮。")
+    if history:
+        print(f"记录文件：{log_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
