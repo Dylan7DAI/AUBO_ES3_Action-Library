@@ -165,6 +165,12 @@ def validate_compiled_motion(
         validated,
         max_velocity_rad_s=velocity,
         sample_period_s=expressive_limits.sample_period_s,
+        max_acceleration_rad_s2=min(
+            motion_plan.acceleration_rad_s2,
+            client.config.safety.max_acceleration_rad_s2,
+            expressive_limits.max_acceleration_rad_s2,
+        ),
+        max_jerk_rad_s3=expressive_limits.max_jerk_rad_s3,
     )
     validate_sampled_trajectory(
         sampled,
@@ -244,7 +250,9 @@ def main() -> int:
                     continue
 
                 plan_dict = plan.model_dump(mode="json")
-                print(json.dumps(scheme.build_preview(plan, round_input), ensure_ascii=False, indent=2))
+                preview = scheme.build_preview(plan, round_input)
+                preview["compiled_metadata"] = compiled.metadata
+                print(json.dumps(preview, ensure_ascii=False, indent=2))
                 confirmation = input("确认现场安全后输入MOVE执行；其他输入取消：").strip()
                 if confirmation != "MOVE":
                     print("已取消，本轮不写入历史。")
