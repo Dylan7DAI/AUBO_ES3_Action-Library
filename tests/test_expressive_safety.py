@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,8 @@ from aubo_es3_actions.expressive_safety import (
     ExpressiveSafetyLimits,
     interpolate_vector,
     sample_joint_keyframes,
+    load_expressive_limits,
+    validate_tcp_pose,
     validate_joint_keyframes,
     validate_sequential_ik,
 )
@@ -81,6 +84,28 @@ class ExpressiveSafetyTests(unittest.TestCase):
             max_jerk_rad_s3=4.0,
         )
         self.assertGreater(len(points), 9)
+
+    def test_recorded_tcp_poses_fit_configured_workspace(self) -> None:
+        limits = load_expressive_limits(
+            Path("config/expressive_motion_limits.json")
+        )
+        pose_data = json.loads(
+            Path("config/emotion_poses_new_es3.json").read_text(encoding="utf-8")
+        )
+        checked = 0
+        expressive_references = (
+            "anticipation_look_down",
+            "joy_lift_max",
+            "joy_shout_peak_max",
+            "disappointment_turn_away",
+            "disappointment_retreat_max",
+        )
+        for name in expressive_references:
+            tcp_pose = pose_data["poses"][name].get("tcp_pose")
+            if tcp_pose is not None:
+                validate_tcp_pose(tcp_pose, limits)
+                checked += 1
+        self.assertGreater(checked, 0)
 
     def test_sequential_ik_branch_jump_is_rejected(self) -> None:
         with self.assertRaises(ExpressiveSafetyError):
