@@ -93,6 +93,8 @@ def sample_joint_keyframes(
     *,
     max_velocity_rad_s: float,
     sample_period_s: float,
+    max_acceleration_rad_s2: float | None = None,
+    max_jerk_rad_s3: float | None = None,
 ) -> list[list[float]]:
     if len(keyframes) < 2:
         raise ExpressiveSafetyError("至少需要两个关节关键帧")
@@ -103,8 +105,16 @@ def sample_joint_keyframes(
     ]
     for start, target in zip(keyframes, keyframes[1:]):
         distance = maximum_difference(start, target)
-        # The peak derivative of the quintic blend is 1.875.
-        duration = max(0.40, 1.875 * distance / velocity)
+        # Peak normalized derivatives for 10t^3-15t^4+6t^5 are
+        # 1.875 (velocity), about 5.774 (acceleration), and 60 (jerk).
+        duration_candidates = [0.40, 1.875 * distance / velocity]
+        if max_acceleration_rad_s2 is not None:
+            acceleration = max(0.01, float(max_acceleration_rad_s2))
+            duration_candidates.append(math.sqrt(5.774 * distance / acceleration))
+        if max_jerk_rad_s3 is not None:
+            jerk = max(0.01, float(max_jerk_rad_s3))
+            duration_candidates.append((60.0 * distance / jerk) ** (1.0 / 3.0))
+        duration = max(duration_candidates)
         steps = max(2, int(math.ceil(duration / period)))
         for index in range(1, steps + 1):
             blend = _quintic(index / steps)
@@ -236,4 +246,3 @@ def validate_sequential_ik(
                 f"IK采样点{index}关节跳变{delta:.4f}rad，疑似切换解分支"
             )
     return points
-

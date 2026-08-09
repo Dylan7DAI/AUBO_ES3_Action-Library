@@ -72,6 +72,16 @@ class ExpressiveSafetyTests(unittest.TestCase):
         self.assertEqual(points[0], [0.0] * 6)
         self.assertEqual(points[-1], [0.2] * 6)
 
+    def test_sampler_stretches_small_motion_for_jerk(self) -> None:
+        points = sample_joint_keyframes(
+            [[0.0] * 6, [0.01] * 6],
+            max_velocity_rad_s=0.3,
+            sample_period_s=0.05,
+            max_acceleration_rad_s2=0.6,
+            max_jerk_rad_s3=4.0,
+        )
+        self.assertGreater(len(points), 9)
+
     def test_sequential_ik_branch_jump_is_rejected(self) -> None:
         with self.assertRaises(ExpressiveSafetyError):
             validate_sequential_ik(
