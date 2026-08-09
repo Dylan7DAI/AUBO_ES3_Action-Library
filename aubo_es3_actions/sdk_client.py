@@ -126,12 +126,57 @@ class AuboSdkClient:
         pose[axis] += float(delta)
         return pose
 
-    def inverse_kinematics(self, target_pose: List[float]) -> List[float]:
+    def forward_kinematics(self, joints: List[float]) -> List[float]:
         robot = self._require_robot()
-        current = self.current_joints()
+        validated = validate_joint_vector(
+            joints,
+            self.config.safety,
+        )
         try:
             algorithm = robot.getRobotAlgorithm()
-            result = algorithm.inverseKinematics(current, list(target_pose))
+            result = algorithm.forwardKinematics(validated)
+        except Exception as exc:
+            raise AuboSdkError(f"正解失败: {exc}") from exc
+
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise AuboSdkError(
+                f"正解返回值格式异常: {result!r}"
+            )
+        pose, code = result
+        if int(code) != 0:
+            raise AuboSdkError(
+                f"正解失败，SDK 返回码: {code}"
+            )
+        values = [float(value) for value in pose]
+        if len(values) != 6:
+            raise AuboSdkError(
+                f"正解位姿长度不是 6: {values}"
+            )
+        return values
+
+    def inverse_kinematics(
+        self,
+        target_pose: List[float],
+        *,
+        seed_joints: Optional[List[float]] = None,
+    ) -> List[float]:
+        robot = self._require_robot()
+        seed = (
+            self.current_joints()
+            if seed_joints is None
+            else validate_joint_vector(
+                seed_joints,
+                self.config.safety,
+            )
+        )
+        try:
+            algorithm = robot.getRobotAlgorithm()
+            inverse = (
+                algorithm.inverseKinematics2
+                if hasattr(algorithm, "inverseKinematics2")
+                else algorithm.inverseKinematics
+            )
+            result = inverse(seed, list(target_pose))
         except Exception as exc:
             raise AuboSdkError(f"逆解失败: {exc}") from exc
 
@@ -141,6 +186,66 @@ class AuboSdkClient:
         if int(code) != 0:
             raise AuboSdkError(f"逆解失败，SDK 返回码: {code}")
         return validate_joint_vector(joints, self.config.safety)
+
+    def stop_motion(
+        self,
+        *,
+        joint_deceleration_rad_s2: float = 1.0,
+        linear_deceleration_m_s2: float = 1.0,
+        rotational_deceleration_rad_s2: float = 1.0,
+    ) -> None:
+        """Request a controlled SDK stop for joint and Cartesian motion.
+
+        This is a software stop and never replaces the robot's physical
+        emergency-stop circuit.
+        """
+        robot = self._require_robot()
+        motion = robot.getMotionControl()
+        attempted = False
+        failures: List[str] = []
+
+        if hasattr(motion, "stopJoint"):
+            attempted = True
+            try:
+                result = motion.stopJoint(
+                    float(joint_deceleration_rad_s2)
+                )
+                if (
+                    isinstance(result, int)
+                    and not isinstance(result, bool)
+                    and result != 0
+                ):
+                    failures.append(
+                        f"stopJoint返回码{result}"
+                    )
+            except Exception as exc:
+                failures.append(f"stopJoint失败: {exc}")
+
+        if hasattr(motion, "stopLine"):
+            attempted = True
+            try:
+                result = motion.stopLine(
+                    float(linear_deceleration_m_s2),
+                    float(rotational_deceleration_rad_s2),
+                )
+                if (
+                    isinstance(result, int)
+                    and not isinstance(result, bool)
+                    and result != 0
+                ):
+                    failures.append(
+                        f"stopLine返回码{result}"
+                    )
+            except Exception as exc:
+                failures.append(f"stopLine失败: {exc}")
+
+        if not attempted:
+            raise AuboSdkError(
+                "当前SDK没有stopJoint或stopLine接口；"
+                "请立即使用实体急停"
+            )
+        if failures:
+            raise AuboSdkError("；".join(failures))
 
     def prepare_for_motion(self) -> None:
         robot = self._require_robot()
