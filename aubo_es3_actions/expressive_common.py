@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Optional, Sequence, TypeVar
@@ -130,6 +131,23 @@ def iter_float_fields(value: Any, prefix: str = ""):
 PlanT = TypeVar("PlanT", bound=BaseModel)
 
 
+@dataclass
+class CompiledMotion:
+    scheme: str
+    keyframes: list[list[float]]
+    velocity_rad_s: float
+    acceleration_rad_s2: float
+    holds_s: list[float] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    requires_cartesian_validation: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.holds_s:
+            self.holds_s = [0.0] * len(self.keyframes)
+        if len(self.holds_s) != len(self.keyframes):
+            raise ValueError("holds_s长度必须与keyframes一致")
+
+
 def call_structured_llm(
     *,
     plan_type: type[PlanT],
@@ -208,4 +226,3 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
