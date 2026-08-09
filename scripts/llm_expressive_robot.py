@@ -96,6 +96,9 @@ def execute_compiled_motion(
     motion_plan: CompiledMotion,
     monitor: EmergencyStopMonitor,
 ) -> None:
+    monitor.check()
+    client.prepare_for_motion()
+    monitor.check()
     motion = client._require_robot().getMotionControl()
     velocity = min(
         motion_plan.velocity_rad_s,
