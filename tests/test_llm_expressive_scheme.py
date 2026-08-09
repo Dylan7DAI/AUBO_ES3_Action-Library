@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
-from scripts.llm_expressive_scheme import PlanModel, build_round_input, validate_plan
+from aubo_es3_actions import load_config
+from aubo_es3_actions.expressive_common import load_joint_pose
+from aubo_es3_actions.expressive_safety import load_expressive_limits
+from scripts.llm_expressive_scheme import (
+    PlanModel,
+    build_round_input,
+    compile_motion,
+    validate_plan,
+)
 
 
 class CandidateSchemeTests(unittest.TestCase):
@@ -45,6 +55,38 @@ class CandidateSchemeTests(unittest.TestCase):
         plan = PlanModel.model_validate(data)
         with self.assertRaises(ValueError):
             validate_plan(plan, {"current_result": "correct", "result_history": ["correct"]})
+
+    def test_local_selector_returns_a_safe_candidate(self) -> None:
+        poses = json.loads(
+            Path("config/emotion_poses_new_es3.json").read_text(encoding="utf-8")
+        )
+        robot_config = load_config("config/robot.curiosity_fast.json")
+
+        class FakeClient:
+            config = robot_config
+
+            def current_joints(self) -> list[float]:
+                return load_joint_pose(poses, "curiosity_down")
+
+        plan = PlanModel.model_validate(self._plan())
+        round_input = build_round_input({
+            "current_result": "correct", "result_history": ["correct"],
+            "transition_type": "continuation", "previous_plan": None,
+        })
+        motion = compile_motion(
+            plan,
+            round_input=round_input,
+            pose_data=poses,
+            client=FakeClient(),
+            expressive_limits=load_expressive_limits(
+                Path("config/expressive_motion_limits.json")
+            ),
+        )
+        self.assertIn(
+            motion.metadata["selected_candidate"]["candidate_id"],
+            {"shape", "rhythm", "path"},
+        )
+        self.assertGreaterEqual(len(motion.keyframes), 4)
 
 
 if __name__ == "__main__":
