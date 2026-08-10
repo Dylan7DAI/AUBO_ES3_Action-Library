@@ -197,7 +197,7 @@ def main() -> int:
 
     history: list[str] = []
     previous_emotion_state: dict[str, Any] = dict(NEUTRAL_EMOTION_STATE)
-    previous_plan: dict[str, Any] | None = None
+    previous_decision: dict[str, Any] | None = None
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = ROOT / "logs" / f"{scheme.SCHEME_ID}_robot_{timestamp}.jsonl"
 
@@ -223,7 +223,7 @@ def main() -> int:
                     "result_history": candidate_history,
                     "transition_type": expected_transition_type(candidate_history),
                     "previous_emotion_state": previous_emotion_state,
-                    "previous_plan": previous_plan,
+                    "previous_decision": previous_decision,
                 }
                 round_input = scheme.build_round_input(base_input)
                 try:
@@ -290,7 +290,7 @@ def main() -> int:
                 )
                 history = candidate_history
                 previous_emotion_state = dict(plan_dict["emotion_state"])
-                previous_plan = plan_dict
+                previous_decision = plan_dict
                 print("本轮执行完成。")
     except (EmergencyStopRequested, KeyboardInterrupt) as exc:
         print(f"急停锁存：{exc}", file=sys.stderr)
