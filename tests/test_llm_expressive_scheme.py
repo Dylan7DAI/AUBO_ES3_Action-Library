@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
-from scripts.llm_expressive_scheme import PlanModel, validate_plan
+from aubo_es3_actions.expressive_common import load_joint_pose
+from aubo_es3_actions.expressive_safety import load_expressive_limits
+from scripts.llm_expressive_scheme import PlanModel, compile_motion, validate_plan
 
 
 class KeyframeIkSchemeTests(unittest.TestCase):
@@ -41,6 +45,41 @@ class KeyframeIkSchemeTests(unittest.TestCase):
         plan = PlanModel.model_validate(data)
         with self.assertRaises(ValueError):
             validate_plan(plan, {"current_result": "correct", "result_history": ["correct"]})
+
+    def test_keyframes_compile_through_seeded_ik(self) -> None:
+        poses = json.loads(
+            Path("config/emotion_poses_new_es3.json").read_text(encoding="utf-8")
+        )
+
+        class FakeClient:
+            def forward_kinematics(self, joints: list[float]) -> list[float]:
+                retreat = load_joint_pose(poses, "disappointment_retreat_max")
+                if max(abs(a - b) for a, b in zip(joints, retreat)) < 1e-8:
+                    return list(
+                        poses["poses"]["disappointment_retreat_max"]["tcp_pose"]
+                    )
+                return [0.30, 0.0, 0.35, -1.0, 0.0, -1.0]
+
+            def inverse_kinematics(
+                self,
+                pose: list[float],
+                *,
+                seed_joints: list[float],
+            ) -> list[float]:
+                del pose
+                return [value + 0.002 for value in seed_joints]
+
+        motion = compile_motion(
+            PlanModel.model_validate(self._plan()),
+            round_input={"current_result": "correct"},
+            pose_data=poses,
+            client=FakeClient(),
+            expressive_limits=load_expressive_limits(
+                Path("config/expressive_motion_limits.json")
+            ),
+        )
+        self.assertEqual(motion.metadata["tcp_sample_count"], 24)
+        self.assertTrue(motion.requires_cartesian_validation)
 
 
 if __name__ == "__main__":
