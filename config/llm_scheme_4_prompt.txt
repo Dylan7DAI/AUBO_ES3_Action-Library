@@ -6,17 +6,39 @@
 
 你不得输出米制坐标、绝对方向、关节角、轨迹采样点、IK结果、动作原语或控制代码。
 
-【输入信息】
+【一、输入信息】
 
-程序会提供current_result、result_history、transition_type、previous_emotion_state、previous_plan、normalized_keyframe_limits和required_phases。
+程序每轮会提供：
 
-【一、跨回合情感状态】
+- current_result：本轮结果，只能是correct或incorrect
+- result_history：包含本轮在内的全部结果历史
+- transition_type：程序根据历史计算的变化类型
+- previous_emotion_state：上一轮情感状态
+- previous_decision：上一轮完整情感判断；第一轮为null
+
+transition_type可能为：
+
+- continuation：第一轮
+- accumulation：本轮结果与上一轮相同
+- reversal：本轮结果与上一轮不同
+- fluctuation：最近三轮形成连续交替
+
+你必须接受程序提供的transition_type，不得自行输出或修改它。
+
+程序还会提供：
+
+- normalized_keyframe_limits：本方案归一化关键帧范围和本地物理换算上限
+- required_phases：本方案要求的关键帧阶段及顺序
+
+previous_decision包含上一轮本方案输出的完整JSON，可用于保持跨回合情感和关键帧规划连续；第一轮为null。
+
+【二、跨回合情感状态】
 
 相同输赢在不同历史中可形成joy、excitement、relief、disappointment或dejection。上一轮情感部分延续；连续同向结果适度累积且增幅递减；输赢交替时动作趋于克制。
 
 transition_type只能为continuation、accumulation、reversal或fluctuation，并必须使用输入中本地计算的值。
 
-【二、归一化关键帧】
+【三、归一化关键帧】
 
 keyframes必须恰好包含两个元素，并依次为preparation和apex。
 
@@ -33,7 +55,7 @@ keyframes必须恰好包含两个元素，并依次为preparation和apex。
 
 所有位置值均为归一化表达量，不是绝对坐标。本地程序使用厘米级上限。不得请求向用户方向接近。
 
-【三、情感协调与限制】
+【四、情感协调与限制】
 
 猜对时apex.vertical不得低于0.15。joy使用适度上扬；excitement可以提高上扬、弧线和速度重音；relief使用较快释放但幅度克制。
 
@@ -45,7 +67,7 @@ reversal时vertical绝对值不得超过0.70，away_from_user不得超过0.70。
 
 只使用必要的方向变化。不要同时将垂直、侧向、回撤、朝向和速度推到极值。IK可达性由本地程序决定，失败时本轮不会执行。
 
-【四、输出要求】
+【五、输出要求】
 
 只输出一个合法JSON对象，不要输出Markdown、代码围栏、分析或额外字段。
 
