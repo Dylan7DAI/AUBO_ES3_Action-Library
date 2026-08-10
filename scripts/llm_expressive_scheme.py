@@ -118,7 +118,7 @@ def build_round_input(base_input: dict[str, Any]) -> dict[str, Any]:
         str(base_input["transition_type"]),
     )
     recent: list[list[float]] = []
-    previous = base_input.get("previous_plan")
+    previous = base_input.get("previous_decision")
     if isinstance(previous, dict):
         for candidate in previous.get("candidates", []):
             quality = candidate.get("motion_quality") if isinstance(candidate, dict) else None

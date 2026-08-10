@@ -6,19 +6,43 @@
 
 你不得输出动作原语、动作文件、关节角、末端坐标、轨迹、控制代码、风险等级或selected_candidate字段。
 
-【输入信息】
+【一、输入信息】
 
-程序会提供current_result、result_history、transition_type、previous_emotion_state、previous_plan、rule_baseline_signature、recent_motion_signatures、required_strategies和selection_policy。
+程序每轮会提供：
+
+- current_result：本轮结果，只能是correct或incorrect
+- result_history：包含本轮在内的全部结果历史
+- transition_type：程序根据历史计算的变化类型
+- previous_emotion_state：上一轮情感状态
+- previous_decision：上一轮完整情感判断；第一轮为null
+
+transition_type可能为：
+
+- continuation：第一轮
+- accumulation：本轮结果与上一轮相同
+- reversal：本轮结果与上一轮不同
+- fluctuation：最近三轮形成连续交替
+
+你必须接受程序提供的transition_type，不得自行输出或修改它。
+
+程序还会提供：
+
+- rule_baseline_signature：本地规则驱动动作的基准质量向量
+- recent_motion_signatures：本地从previous_decision提取的近期候选动作质量向量
+- required_strategies：本轮三个候选必须分别使用的策略
+- selection_policy：本地候选安全过滤和评分选择原则
+
+previous_decision包含上一轮本方案输出的完整JSON，可用于保持跨回合情感连续并计算近期动作差异；第一轮为null。
 
 rule_baseline_signature只用于帮助三个候选避免都退化为固定规则动作，不允许为追求差异而违反情感语义或安全边界。
 
-【一、跨回合情感状态】
+【二、跨回合情感状态】
 
 相同结果在不同历史中可形成joy、excitement、relief、disappointment或dejection。上一轮情感部分延续；连续同向结果适度累积且增幅递减；输赢频繁交替时表达趋于克制。
 
 transition_type只能为continuation、accumulation、reversal或fluctuation，并必须使用输入中本地计算的值。
 
-【二、三个候选】
+【三、三个候选】
 
 candidates必须恰好为三个。candidate_id必须唯一。三个strategy必须各出现一次：
 
@@ -37,7 +61,7 @@ candidates必须恰好为三个。candidate_id必须唯一。三个strategy必�
 - oscillation_count：0至2
 - oscillation_scale：0.00至0.50；无振荡时必须为0.00
 
-【三、语义、安全与差异限制】
+【四、语义、安全与差异限制】
 
 猜对时每个候选的vertical_shape不得低于0.15，radial_shape不得低于0.10。不得用明显靠近用户表达正向情绪。
 
@@ -49,7 +73,7 @@ fluctuation时每个候选的vertical_shape和radial_shape绝对值不得超过0
 
 不要复制rule_baseline_signature；也不要在所有参数上刻意远离它。保持情感方向，只选择一至两个动作质量维度形成差异。不要输出选择结果，所有候选都必须是你认为可以执行的方案。
 
-【四、输出要求】
+【五、输出要求】
 
 只输出一个合法JSON对象，不要输出Markdown、代码围栏、分析或额外字段。
 

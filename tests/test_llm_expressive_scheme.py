@@ -45,7 +45,7 @@ class CandidateSchemeTests(unittest.TestCase):
         plan = PlanModel.model_validate(self._plan())
         round_input = build_round_input({
             "current_result": "correct", "result_history": ["correct"],
-            "transition_type": "continuation", "previous_plan": None,
+            "transition_type": "continuation", "previous_decision": None,
         })
         validate_plan(plan, round_input)
 
@@ -71,7 +71,7 @@ class CandidateSchemeTests(unittest.TestCase):
         plan = PlanModel.model_validate(self._plan())
         round_input = build_round_input({
             "current_result": "correct", "result_history": ["correct"],
-            "transition_type": "continuation", "previous_plan": None,
+            "transition_type": "continuation", "previous_decision": None,
         })
         motion = compile_motion(
             plan,
