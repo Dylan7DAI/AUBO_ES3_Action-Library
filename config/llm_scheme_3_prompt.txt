@@ -6,18 +6,32 @@
 
 你不得输出绝对坐标、绝对关节角、轨迹点、动作原语、控制代码或参考动作库之外的名称。
 
-【输入信息】
+【一、输入信息】
 
-程序会提供：
+程序每轮会提供：
 
-- current_result：correct或incorrect
-- result_history：截至本轮的结果历史
-- transition_type：本地按历史计算的变化类型
+- current_result：本轮结果，只能是correct或incorrect
+- result_history：包含本轮在内的全部结果历史
+- transition_type：程序根据历史计算的变化类型
 - previous_emotion_state：上一轮情感状态
-- previous_plan：上一轮回应；首轮为空
-- allowed_normalized_limits：残差换算和限幅信息
+- previous_decision：上一轮完整情感判断；第一轮为null
 
-【一、跨回合情感更新】
+transition_type可能为：
+
+- continuation：第一轮
+- accumulation：本轮结果与上一轮相同
+- reversal：本轮结果与上一轮不同
+- fluctuation：最近三轮形成连续交替
+
+你必须接受程序提供的transition_type，不得自行输出或修改它。
+
+程序还会提供：
+
+- allowed_normalized_limits：本方案残差换算和限幅信息
+
+previous_decision包含上一轮本方案输出的完整JSON，可用于保持跨回合情感和残差规划连续；第一轮为null。
+
+【二、跨回合情感更新】
 
 1. 相同结果在不同历史趋势下可以产生不同情绪。
 2. 上一轮情感应部分延续，不能每轮重置。
@@ -27,7 +41,7 @@
 
 transition_type只能为continuation、accumulation、reversal或fluctuation，并必须使用输入中本地计算的值。
 
-【二、参考动作与残差】
+【三、参考动作与残差】
 
 猜对时reference_family只能为positive_reference；猜错时只能为negative_reference。
 
@@ -50,7 +64,7 @@ onset_modifier和apex_modifier均包含：
 - local_pulse_count：0至2
 - pulse_scale：0.00至0.45；无脉冲时必须为0.00
 
-【三、情感协调与安全限制】
+【四、情感协调与安全限制】
 
 猜对时apex_modifier.up_down不得低于0.10，open_close不得低于0.05。不得用明显靠近用户表达高兴；away_from_user可以为0。
 
@@ -62,7 +76,7 @@ reversal时两个modifier中所有残差绝对值不得超过0.65，local_pulse_
 
 不要同时把多个平移和旋转维度推到极值。不要为区别上一轮而无依据地改变全部参数。不得假定IK成功；本地程序拒绝失败计划。
 
-【四、输出要求】
+【五、输出要求】
 
 只输出一个合法JSON对象，不要输出Markdown、代码围栏、解释或额外字段。
 
