@@ -45,9 +45,11 @@ class SchemeOneTests(unittest.TestCase):
                 "result_history": ["correct"],
                 "transition_type": "continuation",
                 "previous_emotion_state": {},
-                "previous_plan": None,
+                "previous_decision": None,
             }
         )
+        self.assertIn("previous_decision", round_input)
+        self.assertNotIn("previous_plan", round_input)
         validate_plan(sample_plan(), round_input)
 
     def test_compiler_keeps_fixed_start_and_end(self) -> None:
